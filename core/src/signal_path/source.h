@@ -18,6 +18,7 @@ public:
         void (*startHandler)(void* ctx);
         void (*stopHandler)(void* ctx);
         void (*tuneHandler)(double freq, void* ctx);
+        void (*gainHandler)(double gain, void* ctx) = NULL; // 可选：外部增益控制（扫描器使用）
         void* ctx;
     };
 
@@ -33,11 +34,13 @@ public:
     void start();
     void stop();
     void tune(double freq);
+    void setGain(double gain);
     void setTuningOffset(double offset);
     void setTuningMode(TuningMode mode);
     void setPanadapterIF(double freq);
 
     std::vector<std::string> getSourceNames();
+    std::string getSelectedName();
 
     Event<std::string> onSourceRegistered;
     Event<std::string> onSourceUnregister;

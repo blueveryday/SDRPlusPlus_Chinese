@@ -224,8 +224,7 @@ int sdrpp_main(int argc, char* argv[]) {
     defConfig["moduleInstances"]["Rigctl 服务器"] = "rigctl_server";
     // defConfig["moduleInstances"]["Rigctl Client"] = "rigctl_client";
     // TODO: Enable rigctl_client when ready
-    // defConfig["moduleInstances"]["Scanner"] = "scanner";
-    // TODO: Enable scanner when ready
+    defConfig["moduleInstances"]["扫描器"] = "scanner";
 
 
     // Themes

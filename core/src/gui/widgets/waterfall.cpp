@@ -1216,6 +1216,24 @@ namespace ImGui {
         latestFFTMtx.unlock();
     }
 
+    float* WaterFall::acquireRawFFT(int& width) {
+        buf_mtx.lock();
+        if (!rawFFTs) {
+            buf_mtx.unlock();
+            return NULL;
+        }
+        width = rawFFTSize;
+        // Return the most recent FFT line (same line pushFFT() consumes)
+        if (waterfallVisible) {
+            return &rawFFTs[currentFFTLine * rawFFTSize];
+        }
+        return rawFFTs;
+    }
+
+    void WaterFall::releaseRawFFT() {
+        buf_mtx.unlock();
+    }
+
     void WaterfallVFO::setOffset(double offset) {
         generalOffset = offset;
         if (reference == REF_CENTER) {

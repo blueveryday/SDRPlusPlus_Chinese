@@ -70,6 +70,7 @@ public:
         handler.startHandler = start;
         handler.stopHandler = stop;
         handler.tuneHandler = tune;
+        handler.gainHandler = setGain;
         handler.stream = &stream;
 
         strcpy(dbTxt, "--");
@@ -356,6 +357,42 @@ private:
         }
         _this->freq = freq;
         flog::info("RTLSDRSourceModule '{0}': Tune: {1}!", _this->name, freq);
+    }
+
+    // 外部增益控制（扫描器按频段/档案设置射频增益）：将 dB 值映射到最接近的 RTL-SDR 增益档位
+    static void setGain(double gain, void* ctx) {
+        RTLSDRSourceModule* _this = (RTLSDRSourceModule*)ctx;
+        if (_this->gainList.size() == 0) {
+            flog::warn("RTLSDRSourceModule '{0}': No gain list available, cannot set gain", _this->name);
+            return;
+        }
+
+        // RTL-SDR 增益单位为 0.1 dB，选取最接近的档位
+        int closestIndex = 0;
+        double closestDiff = std::abs((double)_this->gainList[0] - gain * 10.0);
+        for (int i = 1; i < (int)_this->gainList.size(); i++) {
+            double diff = std::abs((double)_this->gainList[i] - gain * 10.0);
+            if (diff < closestDiff) {
+                closestDiff = diff;
+                closestIndex = i;
+            }
+        }
+        _this->gainId = closestIndex;
+
+        if (!_this->running) {
+            flog::warn("RTLSDRSourceModule '{0}': Cannot set gain - device not running", _this->name);
+            return;
+        }
+
+        // 外部控制增益时自动关闭调谐器 AGC（不写入配置，设备重启后恢复原设置）
+        if (_this->tunerAgc) {
+            flog::info("RTLSDRSourceModule '{0}': Auto-disabling Tuner AGC for external gain control", _this->name);
+            _this->tunerAgc = false;
+            rtlsdr_set_tuner_gain_mode(_this->openDev, 1);
+        }
+        rtlsdr_set_tuner_gain(_this->openDev, _this->gainList[_this->gainId]);
+        flog::info("RTLSDRSourceModule '{0}': Set gain to {1:.1f} dB (RTL-SDR gain: {2:.1f} dB)",
+                   _this->name, gain, (double)_this->gainList[_this->gainId] / 10.0);
     }
 
     static void menuHandler(void* ctx) {
