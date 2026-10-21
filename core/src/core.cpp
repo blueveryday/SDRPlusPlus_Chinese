@@ -13,6 +13,7 @@
 #include <core.h>
 #include <filesystem>
 #include <gui/menus/theme.h>
+#include <gui/menus/display.h>
 #include <backend.h>
 
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
@@ -59,7 +60,7 @@ namespace core {
 
 // main
 int sdrpp_main(int argc, char* argv[]) {
-    flog::info("SDR++ 简体中文 v" VERSION_STR);
+    flog::info("SDR++ CE 中文版 v" VERSION_STR);
 
 #ifdef IS_MACOS_BUNDLE
     // If this is a MacOS .app, CD to the correct directory
@@ -124,6 +125,9 @@ int sdrpp_main(int argc, char* argv[]) {
     defConfig["fastFFT"] = false;
     defConfig["fftHeight"] = 300;
     defConfig["fftRate"] = 20;
+    defConfig["mpxLineWidth"] = displaymenu::MPX_DEFAULT_LINE_WIDTH;
+    defConfig["mpxRefreshRate"] = displaymenu::MPX_DEFAULT_REFRESH_RATE;
+    defConfig["mpxSmoothingFactor"] = displaymenu::MPX_DEFAULT_SMOOTHING_FACTOR;
     defConfig["fftSize"] = 65536;
     defConfig["fftWindow"] = 2;
     defConfig["frequency"] = 100000000.0;

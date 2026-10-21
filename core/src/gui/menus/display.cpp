@@ -29,6 +29,11 @@ namespace displaymenu {
     bool snrSmoothing = false;
     int snrSmoothingSpeed = 20;
 
+    // MPX 分析变量
+    SDRPP_EXPORT int mpxRefreshRate = MPX_DEFAULT_REFRESH_RATE;
+    SDRPP_EXPORT float mpxLineWidth = MPX_DEFAULT_LINE_WIDTH;
+    SDRPP_EXPORT int mpxSmoothingFactor = MPX_DEFAULT_SMOOTHING_FACTOR;
+
     OptionList<int, int> fftSizes;
     OptionList<float, float> uiScales;
 
@@ -103,6 +108,20 @@ namespace displaymenu {
         snrSmoothingSpeed = core::configManager.conf["snrSmoothingSpeed"];
         gui::waterfall.setSNRSmoothing(snrSmoothing);
         updateFFTSpeeds();
+
+        // 读取 MPX 设置，缺省时写入默认值
+        if (!core::configManager.conf.contains("mpxRefreshRate")) {
+            core::configManager.conf["mpxRefreshRate"] = MPX_DEFAULT_REFRESH_RATE;
+        }
+        if (!core::configManager.conf.contains("mpxLineWidth")) {
+            core::configManager.conf["mpxLineWidth"] = MPX_DEFAULT_LINE_WIDTH;
+        }
+        if (!core::configManager.conf.contains("mpxSmoothingFactor")) {
+            core::configManager.conf["mpxSmoothingFactor"] = MPX_DEFAULT_SMOOTHING_FACTOR;
+        }
+        mpxRefreshRate = core::configManager.conf["mpxRefreshRate"];
+        mpxLineWidth = core::configManager.conf["mpxLineWidth"];
+        mpxSmoothingFactor = core::configManager.conf["mpxSmoothingFactor"];
 
         // Define and load UI scales
         uiScales.define(1.0f, "100%", 1.0f);
@@ -210,6 +229,38 @@ namespace displaymenu {
             core::configManager.acquire();
             core::configManager.conf["fftRate"] = fftRate;
             core::configManager.release(true);
+        }
+
+        // MPX 分析设置
+        if (ImGui::CollapsingHeader("MPX 分析设置")) {
+            ImGui::LeftLabel("MPX 刷新率");
+            ImGui::SetNextItemWidth(menuWidth - ImGui::GetCursorPosX());
+            if (ImGui::InputInt("##sdrpp_mpx_rate", &mpxRefreshRate, 1, 10)) {
+                mpxRefreshRate = std::max<int>(1, mpxRefreshRate);
+                mpxRefreshRate = std::min<int>(60, mpxRefreshRate);  // 上限 60 Hz
+                core::configManager.acquire();
+                core::configManager.conf["mpxRefreshRate"] = mpxRefreshRate;
+                core::configManager.release(true);
+            }
+
+            ImGui::LeftLabel("MPX 线宽");
+            ImGui::SetNextItemWidth(menuWidth - ImGui::GetCursorPosX());
+            if (ImGui::SliderFloat("##sdrpp_mpx_width", &mpxLineWidth, 0.5f, 5.0f, "%.1f px")) {
+                core::configManager.acquire();
+                core::configManager.conf["mpxLineWidth"] = mpxLineWidth;
+                core::configManager.release(true);
+            }
+
+            ImGui::LeftLabel("MPX 平滑");
+            ImGui::SetNextItemWidth(menuWidth - ImGui::GetCursorPosX());
+            if (ImGui::SliderInt("##sdrpp_mpx_smooth", &mpxSmoothingFactor, 1, 10, "%d")) {
+                core::configManager.acquire();
+                core::configManager.conf["mpxSmoothingFactor"] = mpxSmoothingFactor;
+                core::configManager.release(true);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("1 = 不平滑 (噪声较大)，10 = 最强平滑 (曲线非常平顺)");
+            }
         }
 
         ImGui::LeftLabel("FFT 尺寸");

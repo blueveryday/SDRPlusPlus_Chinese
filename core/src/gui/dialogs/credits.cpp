@@ -33,7 +33,7 @@ namespace credits {
         ImGui::Spacing();
 
 #ifdef __ANDROID__
-        ImGui::TextUnformatted("简体中文版本 v" VERSION_STR " (构建于 " __TIME__ ", " __DATE__ ")");
+        ImGui::TextUnformatted("中文版本 v" VERSION_STR " (构建于 " __TIME__ ", " __DATE__ ")");
 #endif
         ImGui::TextUnformatted("这个软件由 Alexandre Rouma (ON5RYZ) 在下列人员的帮助下为您带来\n\n");
 
