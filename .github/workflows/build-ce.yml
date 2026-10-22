@@ -1,9 +1,9 @@
-name: Build Binaries for windows linux mac android
+name: Build SDR++ CE 中文版
 
 on:
     push:
-        tags:
-        - 'v[0-9]+.[0-9]+.[0-9]+'
+        branches: [ce]
+        tags: ['v*.*.*']
     workflow_dispatch:
         inputs:
             publish:
@@ -664,12 +664,12 @@ jobs:
             
             if ! gh release view "$TAG_NAME" > /dev/null 2>&1; then
               echo "Release $TAG_NAME does not exist. Creating it..."
-              gh release create "$TAG_NAME" --title "SDR++ 简体中文版 $TAG_NAME" --notes "## SDR++ 简体中文版 $TAG_NAME
+              gh release create "$TAG_NAME" --title "SDR++ CE 中文版 $TAG_NAME" --notes "## SDR++ CE中文版 $TAG_NAME
             
             ### 更新内容
-            - 同步上游 SDR++ 最新代码
-            - 中文界面修复与优化
-            - 完整提交记录请查看仓库 commit 历史
+            - 集成kimiSDR信号源
+            - 汉化SDR++ CE
+            - 完整提交查看仓库 commit 历史
             
             ### 下载说明
             
