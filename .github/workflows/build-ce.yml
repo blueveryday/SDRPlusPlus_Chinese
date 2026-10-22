@@ -2,7 +2,6 @@ name: Build SDR++ CE 中文版
 
 on:
     push:
-        branches: [ce]
         tags: ['v*.*.*']
     workflow_dispatch:
         inputs:
