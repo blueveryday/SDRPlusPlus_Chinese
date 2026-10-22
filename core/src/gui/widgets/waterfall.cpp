@@ -127,15 +127,15 @@ namespace ImGui {
         if (src) {
             // 按钮只有 20 像素，预先缩小到 64x64 并按透明度加权，避免边缘锯齿和黑边
             const int size = 64;
-            std::vector<uint8_t> small(size * size * 4);
-            stbir_resize_uint8_generic(src, w, h, w * 4, small.data(), size, size, size * 4, 4, 3, 0,
+            std::vector<uint8_t> iconBuf(size * size * 4);
+            stbir_resize_uint8_generic(src, w, h, w * 4, iconBuf.data(), size, size, size * 4, 4, 3, 0,
                                        STBIR_EDGE_CLAMP, STBIR_FILTER_DEFAULT, STBIR_COLORSPACE_LINEAR, NULL);
             glGenTextures(1, &autoBtnTextureId);
             glBindTexture(GL_TEXTURE_2D, autoBtnTextureId);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
             glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, size, size, 0, GL_RGBA, GL_UNSIGNED_BYTE, small.data());
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, size, size, 0, GL_RGBA, GL_UNSIGNED_BYTE, iconBuf.data());
             stbi_image_free(src);
         }
         else {
