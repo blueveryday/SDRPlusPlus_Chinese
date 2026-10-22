@@ -1,9 +1,9 @@
-name: Build SDR++ CE Binaries for windows linux mac and android
+name: Build SDR++ CE 中文版
 
 on:
     push:
-        tags:
-        - 'v[0-9]+.[0-9]+.[0-9]+'
+        branches: [ce]
+        tags: ['v*.*.*']
     workflow_dispatch:
         inputs:
             publish:

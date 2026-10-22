@@ -19,16 +19,17 @@ SDR++ 是一款跨平台且开源的软件定义无线电 (SDR) 软件，其设�
 
 ## 中文版本
 
-[发布页面](https://github.com/blueveryday/SDRPlusPlus/releases)下载最新版本
+[发布页面](https://github.com/blueveryday/SDRPlusPlus_Chinese/releases)下载最新版本
 
 
 ## 英文版
 
-[发布页面](https://github.com/AlexandreRouma/SDRPlusPlus/releases)下载最新版本
+[Rlease](https://github.com/AlexandreRouma/SDRPlusPlus/releases)下载最新版本
 
 
 ## 英文CE版
-https://github.com/LunaeMons/SDRPlusPlus_CommunityEdition/releases
+[Rlease]
+(https://github.com/LunaeMons/SDRPlusPlus_CommunityEdition/releases)下载最新版本
 
 
 # SDR++ Community Edition 🌟
