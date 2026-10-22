@@ -3,6 +3,13 @@
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
 #include <GLFW/glfw3.h>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#define GLFW_EXPOSE_NATIVE_WIN32
+#include <GLFW/glfw3native.h>
+#endif
 #include <utils/flog.h>
 #include <utils/opengl_include_code.h>
 #include <version.h>
@@ -153,6 +160,22 @@ namespace backend {
         stbir_resize_uint8(icons[0].pixels, icons[0].width, icons[0].height, icons[0].width * 4, icons[8].pixels, 196, 196, 196 * 4, 4);
         stbir_resize_uint8(icons[0].pixels, icons[0].width, icons[0].height, icons[0].width * 4, icons[9].pixels, 256, 256, 256 * 4, 4);
         glfwSetWindowIcon(window, 10, icons);
+
+    #ifdef _WIN32
+        // 保底措施：直接用 Win32 接口把嵌入 exe 的图标设为窗口的大/小图标，
+        // 避免任务栏只显示默认空白图标
+        {
+            HWND hwnd = glfwGetWin32Window(window);
+            HINSTANCE hInst = GetModuleHandleW(NULL);
+            HICON bigIcon = (HICON)LoadImageW(hInst, L"GLFW_ICON", IMAGE_ICON, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR);
+            HICON smallIcon = (HICON)LoadImageW(hInst, L"GLFW_ICON", IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
+            if (hwnd && bigIcon) { SendMessageW(hwnd, WM_SETICON, ICON_BIG, (LPARAM)bigIcon); }
+            if (hwnd && smallIcon) { SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)smallIcon); }
+            if (!bigIcon || !smallIcon) {
+                flog::warn("无法从可执行文件加载窗口图标 (错误码 {0})，将使用 GLFW 设置的图标", (int)GetLastError());
+            }
+        }
+    #endif
         stbi_image_free(icons[0].pixels);
         for (int i = 1; i < 10; i++) {
             free(icons[i].pixels);
