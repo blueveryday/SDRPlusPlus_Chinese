@@ -24,7 +24,7 @@ namespace credits {
         ImGui::BeginPopupModal("Credits", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove);
 
         ImGui::PushFont(style::hugeFont);
-        ImGui::TextUnformatted("SDR++          ");
+        ImGui::TextUnformatted("SDR++ CE          ");
         ImGui::PopFont();
         ImGui::SameLine();
         ImGui::Image(icons::LOGO, imageSize);

@@ -248,6 +248,7 @@ namespace ImGui {
         ImGuiWindow* window;
 
         GLuint textureId;
+        GLuint autoBtnTextureId = 0;
 
         std::recursive_mutex buf_mtx;
         std::recursive_mutex latestFFTMtx;

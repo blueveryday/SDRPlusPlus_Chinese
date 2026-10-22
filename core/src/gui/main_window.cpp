@@ -673,6 +673,27 @@ void MainWindow::draw() {
     }
 }
 
+void MainWindow::setFFTMin(float min) {
+    // 同步滑块和瀑布图，并保存到配置
+    fftMin = min;
+    gui::waterfall.setFFTMin(min);
+    gui::waterfall.setWaterfallMin(min);
+
+    core::configManager.acquire();
+    core::configManager.conf["min"] = min;
+    core::configManager.release(true);
+}
+
+void MainWindow::setFFTMax(float max) {
+    fftMax = max;
+    gui::waterfall.setFFTMax(max);
+    gui::waterfall.setWaterfallMax(max);
+
+    core::configManager.acquire();
+    core::configManager.conf["max"] = max;
+    core::configManager.release(true);
+}
+
 void MainWindow::setPlayState(bool _playing) {
     if (_playing == playing) { return; }
     if (_playing) {
