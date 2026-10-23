@@ -6,13 +6,16 @@
         android:label="SDR++"
         android:allowBackup="false"
         android:fullBackupContent="false"
-        android:hasCode="true">
+        android:hasCode="true"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher">
 
         <activity
             android:name="org.sdrpp.sdrpp.MainActivity"
-            android:icon="@mipmap/ic_launcher"
             android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
             android:screenOrientation="sensorLandscape"
+            android:windowSoftInputMode="adjustPan|stateHidden"
+            android:exported="true"
             android:configChanges="orientation|keyboardHidden|screenSize">
             <meta-data android:name="android.app.lib_name" android:value="sdrpp_core" />
 
@@ -22,7 +25,6 @@
             </intent-filter>
         </activity>
 
-        <!-- 前台服务：屏幕熄灭或切到后台时保持进程运行 -->
         <service
             android:name="org.sdrpp.sdrpp.SdrForegroundService"
             android:exported="false" />

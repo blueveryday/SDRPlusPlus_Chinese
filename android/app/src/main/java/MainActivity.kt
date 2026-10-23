@@ -11,13 +11,16 @@ import android.hardware.usb.*
 import android.Manifest
 import android.os.Bundle
 import android.view.View
+import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.util.Log
 import android.content.res.AssetManager
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
+import android.text.Spanned
 import android.widget.EditText
+import android.widget.FrameLayout
 
 import androidx.core.app.ActivityCompat
 import androidx.core.content.PermissionChecker
@@ -36,13 +39,10 @@ private val usbReceiver = object : BroadcastReceiver() {
                 _this.SDR_device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
                 if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
                     _this.SDR_conn = _this.usbManager!!.openDevice(_this.SDR_device)
-                    
-                    // Save SDR info
                     _this.SDR_VID = _this.SDR_device!!.vendorId
                     _this.SDR_PID = _this.SDR_device!!.productId
                     _this.SDR_FD = _this.SDR_conn!!.fileDescriptor
                 }
-                
                 context.unregisterReceiver(this)
                 _this.hideSystemBars()
             }
@@ -60,8 +60,6 @@ class MainActivity : NativeActivity() {
     var SDR_FD: Int = -1
 
     private var hiddenEditText: EditText? = null
-
-    // Queue for the Unicode characters to be polled from native code (via pollUnicodeChar())
     private val unicodeCharacterQueue: LinkedBlockingQueue<Int> = LinkedBlockingQueue()
 
     fun checkAndAsk(permission: String) {
@@ -93,27 +91,30 @@ class MainActivity : NativeActivity() {
         }
 
         checkAndAsk(Manifest.permission.INTERNET)
-
         super.onCreate(savedInstanceState)
 
         ContextCompat.startForegroundService(this, Intent(this, SdrForegroundService::class.java))
-        
         SdrFilePicker.init(this)
 
         hiddenEditText = EditText(this).apply {
-            alpha = 0f
-            inputType = InputType.TYPE_CLASS_TEXT or 
-                        InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS or
-                        InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+            alpha = 0.01f
+            isFocusable = true
+            isFocusableInTouchMode = true
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             
             addTextChangedListener(object : TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
-                override fun afterTextChanged(s: Editable?) {
-                    if (!s.isNullOrEmpty()) {
-                        for (char in s) {
-                            unicodeCharacterQueue.offer(char.toInt())
+                
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    if (count > 0 && s != null) {
+                        for (i in start until start + count) {
+                            unicodeCharacterQueue.offer(s[i].toInt())
                         }
+                    }
+                }
+                
+                override fun afterTextChanged(s: Editable?) {
+                    if (s != null && s.isNotEmpty()) {
                         s.clear()
                     }
                 }
@@ -125,7 +126,7 @@ class MainActivity : NativeActivity() {
                         unicodeCharacterQueue.offer(8)
                         return@setOnKeyListener true
                     } else if (keyCode == android.view.KeyEvent.KEYCODE_ENTER) {
-                        unicodeCharacterQueue.offer(10) // 回车键 ASCII
+                        unicodeCharacterQueue.offer(10)
                         return@setOnKeyListener true
                     }
                 }
@@ -133,7 +134,10 @@ class MainActivity : NativeActivity() {
             }
         }
 
-        addContentView(hiddenEditText, android.view.ViewGroup.LayoutParams(1, 1))
+        val params = FrameLayout.LayoutParams(1, 1)
+        params.leftMargin = 0
+        params.topMargin = 0
+        addContentView(hiddenEditText, params)
     }
 
     override fun onDestroy() {
@@ -147,15 +151,24 @@ class MainActivity : NativeActivity() {
     }
 
     fun showSoftInput() {
-        hiddenEditText?.requestFocus()
-        val inputMethodManager = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-        inputMethodManager.showSoftInput(hiddenEditText, InputMethodManager.SHOW_IMPLICIT)
+        runOnUiThread {
+            window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
+            hiddenEditText?.let { editText ->
+                editText.requestFocus()
+                editText.postDelayed({
+                    val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                    imm.showSoftInput(editText, InputMethodManager.SHOW_FORCED)
+                }, 50)
+            }
+        }
     }
 
     fun hideSoftInput() {
-        val inputMethodManager = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-        inputMethodManager.hideSoftInputFromWindow(hiddenEditText?.windowToken, 0)
-        hideSystemBars()
+        runOnUiThread {
+            val inputMethodManager = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+            inputMethodManager.hideSoftInputFromWindow(hiddenEditText?.windowToken, 0)
+            hideSystemBars()
+        }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -169,11 +182,7 @@ class MainActivity : NativeActivity() {
 
     fun createIfDoesntExist(path: String) {
         val folder = File(path)
-        var success = true
-        if (!folder.exists()) {
-            success = folder.mkdirs()
-        }
-        if (!success) {
+        if (!folder.exists() && !folder.mkdirs()) {
             Log.e(TAG, "Could not create folder with path $path")
         }
     }
@@ -184,12 +193,9 @@ class MainActivity : NativeActivity() {
         for (fp in flist) {
             val lpath = "$local/$fp"
             val rpath = "$rsrc/$fp"
-
             Log.w(TAG, "Extracting '$rpath' to '$lpath'")
-
             createIfDoesntExist(local)
             val ext = extractDir(aman, lpath, rpath)
-
             if (ext == 0) {
                 val _os = FileOutputStream(lpath)
                 val _is = aman.open(rpath)
@@ -207,8 +213,7 @@ class MainActivity : NativeActivity() {
 
     fun getAppDir(): String {
         val fdir = filesDir.absolutePath
-        val aman = assets
-        extractDir(aman, "$fdir/res", "res")
+        extractDir(assets, "$fdir/res", "res")
         createIfDoesntExist("$fdir/modules")
         return fdir
     }
