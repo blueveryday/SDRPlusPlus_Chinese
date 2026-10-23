@@ -192,7 +192,11 @@ namespace backend {
                 }
             }
 
-            if (_EglDisplay == EGL_NO_DISPLAY) { continue; }
+            if (_EglDisplay == EGL_NO_DISPLAY) {
+                // 窗口已销毁（屏幕熄灭或切到后台）时不要空转，否则会占满一个 CPU 核心
+                std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                continue;
+            }
 
             if (!pauseRendering) {
                 // Initiate a new frame
@@ -486,3 +490,76 @@ extern "C" {
         sdrpp_main(3, dummy);
     }
 }
+
+#ifdef __ANDROID__
+namespace backend {
+    static std::function<void(std::string)> g_openCallback = nullptr;
+    static std::function<void(std::string)> g_saveCallback = nullptr;
+
+    void openFileDialog(std::function<void(std::string)> callback) {
+        g_openCallback = callback;
+        JavaVM* java_vm = app->activity->vm;
+        JNIEnv* java_env = NULL;
+        jint jni_return = java_vm->GetEnv((void**)&java_env, JNI_VERSION_1_6);
+        if (jni_return == JNI_ERR) return;
+        jni_return = java_vm->AttachCurrentThread(&java_env, NULL);
+        if (jni_return != JNI_OK) return;
+
+        jclass clazz = java_env->FindClass("org/sdrpp/sdrpp/SdrFilePicker");
+        if (clazz) {
+            jfieldID instanceField = java_env->GetStaticFieldID(clazz, "INSTANCE", "Lorg/sdrpp/sdrpp/SdrFilePicker;");
+            jobject instance = java_env->GetStaticObjectField(clazz, instanceField);
+            jmethodID method = java_env->GetMethodID(clazz, "openDocument", "()V");
+            if (method) java_env->CallVoidMethod(instance, method);
+            java_env->DeleteLocalRef(clazz);
+        }
+        java_vm->DetachCurrentThread();
+    }
+
+    void saveFileDialog(std::string cacheFilePath, std::string defaultName, std::function<void(std::string)> callback) {
+        g_saveCallback = callback;
+        JavaVM* java_vm = app->activity->vm;
+        JNIEnv* java_env = NULL;
+        jint jni_return = java_vm->GetEnv((void**)&java_env, JNI_VERSION_1_6);
+        if (jni_return == JNI_ERR) return;
+        jni_return = java_vm->AttachCurrentThread(&java_env, NULL);
+        if (jni_return != JNI_OK) return;
+
+        jclass clazz = java_env->FindClass("org/sdrpp/sdrpp/SdrFilePicker");
+        if (clazz) {
+            jfieldID instanceField = java_env->GetStaticFieldID(clazz, "INSTANCE", "Lorg/sdrpp/sdrpp/SdrFilePicker;");
+            jobject instance = java_env->GetStaticObjectField(clazz, instanceField);
+            jmethodID method = java_env->GetMethodID(clazz, "saveDocument", "(Ljava/lang/String;Ljava/lang/String;)V");
+            if (method) {
+                jstring jPath = java_env->NewStringUTF(cacheFilePath.c_str());
+                jstring jName = java_env->NewStringUTF(defaultName.c_str());
+                java_env->CallVoidMethod(instance, method, jPath, jName);
+                java_env->DeleteLocalRef(jPath);
+                java_env->DeleteLocalRef(jName);
+            }
+            java_env->DeleteLocalRef(clazz);
+        }
+        java_vm->DetachCurrentThread();
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL Java_org_sdrpp_sdrpp_SdrFilePicker_nativeOnResultOpen(JNIEnv* env, jobject thiz, jstring path) {
+    const char* str = env->GetStringUTFChars(path, nullptr);
+    std::string result(str);
+    env->ReleaseStringUTFChars(path, str);
+    if (backend::g_openCallback) {
+        backend::g_openCallback(result);
+        backend::g_openCallback = nullptr; 
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL Java_org_sdrpp_sdrpp_SdrFilePicker_nativeOnResultSave(JNIEnv* env, jobject thiz, jstring result) {
+    const char* str = env->GetStringUTFChars(result, nullptr);
+    std::string res(str);
+    env->ReleaseStringUTFChars(result, str);
+    if (backend::g_saveCallback) {
+        backend::g_saveCallback(res);
+        backend::g_saveCallback = nullptr; 
+    }
+}
+#endif

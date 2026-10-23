@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <functional>
 
 namespace backend {
     int init(std::string resDir = "");
@@ -9,4 +10,11 @@ namespace backend {
     void setMouseScreenPos(double x, double y);
     int renderLoop();
     int end();
+
+    std::string getAppFilesDir();
+
+#ifdef __ANDROID__
+    void openFileDialog(std::function<void(std::string)> callback);
+    void saveFileDialog(std::string cacheFilePath, std::string defaultName, std::function<void(std::string)> callback);
+#endif
 }

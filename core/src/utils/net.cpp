@@ -1,4 +1,5 @@
 #include "net.h"
+#include <utils/flog.h>
 #include <string.h>
 #include <codecvt>
 #include <stdexcept>
@@ -138,8 +139,12 @@ namespace net {
     }
 
     int Socket::send(const uint8_t* data, size_t len, const Address* dest) {
-        // Send data
-        int err = sendto(sock, (const char*)data, len, 0, (sockaddr*)(dest ? &dest->addr : (raddr ? &raddr->addr : NULL)), sizeof(sockaddr_in));
+        int err;
+        if (!dest && !raddr) {
+            err = ::send(sock, (const char*)data, len, 0);
+        } else {
+            err = sendto(sock, (const char*)data, len, 0, (sockaddr*)(dest ? &dest->addr : &raddr->addr), sizeof(struct sockaddr_storage));
+        }
 
         // On error, close socket
         if (err <= 0 && !WOULD_BLOCK) {
@@ -177,9 +182,16 @@ namespace net {
                 if (err <= 0) { return err; }
             }
 
-            // Receive
-            int addrLen = sizeof(sockaddr_in);
-            int err = ::recvfrom(sock, (char*)&data[read], maxLen - read, 0,(sockaddr*)(dest ? &dest->addr : NULL), (socklen_t*)(dest ? &addrLen : NULL));
+            int err;
+            // 【修复】如果是 TCP 接收，直接使用 recv()
+            if (!dest) {
+                err = ::recv(sock, (char*)&data[read], maxLen - read, 0);
+            } else {
+                // 如果是 UDP，使用 recvfrom 和通用的 sockaddr_storage
+                int addrLen = sizeof(struct sockaddr_storage);
+                err = ::recvfrom(sock, (char*)&data[read], maxLen - read, 0, (sockaddr*)&dest->addr, (socklen_t*)&addrLen);
+            }
+
             if (err <= 0 && !WOULD_BLOCK) {
                 close();
                 return err;
@@ -244,7 +256,7 @@ namespace net {
         }
 
         // Accept
-        int addrLen = sizeof(sockaddr_in);
+        int addrLen = sizeof(struct sockaddr_storage);
         SockHandle_t s = ::accept(sock, (sockaddr*)(dest ? &dest->addr : NULL), (socklen_t*)(dest ? &addrLen : NULL));
         if ((int)s < 0) {
             if (!WOULD_BLOCK) { stop(); }
@@ -381,7 +393,60 @@ namespace net {
     }
 
     std::shared_ptr<Socket> connect(std::string host, int port) {
-        return connect(Address(host, port));
+        // Init library if needed
+        init();
+
+        if (host.size() >= 2 && host.front() == '[' && host.back() == ']') {
+            host = host.substr(1, host.size() - 2);
+        }
+
+        struct addrinfo hints;
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_protocol = IPPROTO_TCP;
+        struct addrinfo* results = NULL;
+        std::string portStr = std::to_string(port);
+        
+        int ret = getaddrinfo(host.c_str(), portStr.c_str(), &hints, &results);
+        if (ret != 0 || !results) {
+            // 【关键修复】跨平台输出错误信息
+#ifdef _WIN32
+            flog::error("getaddrinfo failed with code {}: {}", ret, gai_strerrorA(ret));
+#else
+            flog::error("getaddrinfo failed with code {}: {}", ret, gai_strerror(ret));
+#endif
+            throw std::runtime_error("Could not resolve host address");
+        }
+
+        for (struct addrinfo* ai = results; ai; ai = ai->ai_next) {
+            SockHandle_t s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+#ifdef _WIN32
+            if (s == INVALID_SOCKET) { continue; }
+#else
+            if (s < 0) { continue; }
+#endif
+            if (::connect(s, ai->ai_addr, (socklen_t)ai->ai_addrlen) == 0) {
+                freeaddrinfo(results);
+
+                // Enable nonblocking mode
+                setNonblocking(s);
+
+                return std::make_shared<Socket>(s);
+            }
+
+#ifdef _WIN32
+            int err = WSAGetLastError();
+            flog::error("Connect attempt failed with WSA error: {}", err);
+#else
+            int err = errno;
+            flog::error("Connect attempt failed with errno: {}", err);
+#endif
+            closeSocket(s);
+        }
+
+        freeaddrinfo(results);
+        throw std::runtime_error("Could not connect to the host");
     }
 
     std::shared_ptr<Socket> openudp(const Address& raddr, const Address& laddr, bool allowBroadcast) {

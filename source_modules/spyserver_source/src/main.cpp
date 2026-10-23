@@ -10,7 +10,6 @@
 #include <gui/widgets/stepped_slider.h>
 #include <gui/smgui.h>
 
-
 #define CONCAT(a, b) ((std::string(a) + b).c_str())
 
 SDRPP_MOD_INFO{
@@ -65,7 +64,7 @@ public:
         handler.tuneHandler = tune;
         handler.stream = &stream;
 
-        strcpy(hostname, host.c_str());
+        snprintf(hostname, sizeof(hostname), "%s", host.c_str());
 
         sigpath::sourceManager.registerSource("SpyServer", &handler);
     }
@@ -238,15 +237,31 @@ private:
             SmGui::SameLine();
             SmGui::Text("Not connected");
         }
+
+        // Error popup
+        if (!_this->errorMsg.empty()) {
+            ImGui::OpenPopup("Connection Error##spyserver_error");
+            if (ImGui::BeginPopup("Connection Error##spyserver_error")) {
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", _this->errorMsg.c_str());
+                if (ImGui::Button("OK")) {
+                    _this->errorMsg.clear();
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
+        }
     }
 
     void tryConnect() {
         try {
             if (client) { client.reset(); }
+            errorMsg = "";
+
             client = spyserver::connect(hostname, port, &stream);
 
             if (!client->waitForDevInfo(3000)) {
                 flog::error("SpyServer didn't respond with device information");
+                errorMsg = "Server No Response (Timeout)";
             }
             else {
                 char buf[1024];
@@ -285,6 +300,7 @@ private:
         }
         catch (const std::exception& e) {
             flog::error("Could not connect to spyserver {}", e.what());
+            errorMsg = std::string("Connection Failed: ") + e.what();
         }
     }
 
@@ -305,6 +321,7 @@ private:
     uint32_t gain = 0;
 
     std::string devRef = "";
+    std::string errorMsg = ""; // add error dispaly msg windows
 
     dsp::stream<dsp::complex_t> stream;
     SourceManager::SourceHandler handler;

@@ -2,6 +2,7 @@
 #include <assert.h>
 #include <utils/flog.h>
 #include <stdexcept>
+#include <cstring>
 
 namespace net {
 
@@ -291,7 +292,6 @@ namespace net {
 
         if (acceptWorkerThread.joinable()) { acceptWorkerThread.join(); }
 
-
         listening = false;
     }
 
@@ -327,10 +327,7 @@ namespace net {
         }
     }
 
-
     Conn connect(std::string host, uint16_t port) {
-        Socket sock;
-
 #ifdef _WIN32
         // Initialize WinSock2
         if (!winsock_init) {
@@ -346,29 +343,55 @@ namespace net {
         signal(SIGPIPE, SIG_IGN);
 #endif
 
-        // Create a socket
-        sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        // 【核心修复】使用 getaddrinfo 替换 gethostbyname，支持 IPv6
+        struct addrinfo hints;
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_protocol = IPPROTO_TCP;
+        struct addrinfo* results = NULL;
+        std::string portStr = std::to_string(port);
+
+        if (getaddrinfo(host.c_str(), portStr.c_str(), &hints, &results) != 0 || !results) {
+            flog::error("getaddrinfo failed for host: {}", host);
+            throw std::runtime_error("Could not resolve host address");
+            return NULL;
+        }
+
+#ifdef _WIN32
+        Socket sock = INVALID_SOCKET;
+#else
+        Socket sock = -1;
+#endif
+
+        for (struct addrinfo* ai = results; ai; ai = ai->ai_next) {
+            sock = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+#ifdef _WIN32
+            if (sock == INVALID_SOCKET) { continue; }
+#else
+            if (sock < 0) { continue; }
+#endif
+            if (::connect(sock, ai->ai_addr, (socklen_t)ai->ai_addrlen) == 0) {
+                // Connected successfully
+                break;
+            }
+            
+            // Connection failed, close socket and try next address
+#ifdef _WIN32
+            closesocket(sock);
+            sock = INVALID_SOCKET;
+#else
+            ::close(sock);
+            sock = -1;
+#endif
+        }
+        freeaddrinfo(results);
+
+#ifdef _WIN32
+        if (sock == INVALID_SOCKET) {
+#else
         if (sock < 0) {
-            throw std::runtime_error("Could not create socket");
-            return NULL;
-        }
-
-        // Get address from hostname/ip
-        hostent* remoteHost = gethostbyname(host.c_str());
-        if (remoteHost == NULL || remoteHost->h_addr_list[0] == NULL) {
-            throw std::runtime_error("Could get address from host");
-            return NULL;
-        }
-        uint32_t* naddr = (uint32_t*)remoteHost->h_addr_list[0];
-
-        // Create host address
-        struct sockaddr_in addr;
-        addr.sin_addr.s_addr = *naddr;
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(port);
-
-        // Connect to host
-        if (::connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+#endif
             throw std::runtime_error("Could not connect to host");
             return NULL;
         }
@@ -484,7 +507,7 @@ namespace net {
 
         // Create host address
         struct sockaddr_in addr;
-        addr.sin_addr.s_addr = INADDR_ANY; //*naddr;
+        addr.sin_addr.s_addr = INADDR_ANY;
         addr.sin_family = AF_INET;
         addr.sin_port = htons(port);
 
