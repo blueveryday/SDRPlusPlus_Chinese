@@ -169,17 +169,17 @@ namespace geomap {
         }
 
         ImGui::SetCursorPos(curpos);
-        if (doFingerButton("Zoom In##geomap-zoom-in")) {
+        if (doFingerButton("放大##geomap-zoom-in")) {
             scale = scale * 2;
             scaleTranslateDirty = true;
         }
         ImGui::SameLine();
-        if (doFingerButton("Zoom Out##geomap-zoom-out")) {
+        if (doFingerButton("缩小##geomap-zoom-out")) {
             scale = scale / 2;
             scaleTranslateDirty = true;
         }
         ImGui::SameLine();
-        if (doFingerButton("Reset Map##reset-map")) {
+        if (doFingerButton("重置地图##reset-map")) {
             scale = ImVec2(1.0, 1.0);
             translate = ImVec2(0.0, 0.0);
             scaleTranslateDirty = true;
