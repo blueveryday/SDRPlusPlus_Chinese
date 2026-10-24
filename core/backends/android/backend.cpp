@@ -14,6 +14,9 @@
 #include <gui/icons.h>
 #include <gui/style.h>
 #include <gui/menus/theme.h>
+#include <gui/touch_scroll.h>
+#include <cmath>
+#include <cfloat>
 #include <filesystem>
 #include <functional>
 #include <mutex>
@@ -75,7 +78,101 @@ namespace backend {
         }
     }
 
+    // 左侧面板的触摸滑动手势（详见 gui/touch_scroll.h）。
+    // 返回 true 表示事件已处理，不再交给 ImGui。
+    static bool handleTouchScroll(AInputEvent* ev) {
+        if (AInputEvent_getType(ev) != AINPUT_EVENT_TYPE_MOTION) { return false; }
+
+        touchscroll::State& st = touchscroll::state();
+        ImGuiIO& io = ImGui::GetIO();
+
+        int32_t action = AMotionEvent_getAction(ev);
+        int32_t actionMasked = action & AMOTION_EVENT_ACTION_MASK;
+        float x = AMotionEvent_getX(ev, 0);
+        float y = AMotionEvent_getY(ev, 0);
+
+        // 只处理手指/手写笔/未知类型；实体鼠标保持原有行为（滚轮本来就能滚动）
+        int32_t tool = AMotionEvent_getToolType(ev, 0);
+        bool isTouch = (tool == AMOTION_EVENT_TOOL_TYPE_FINGER) || (tool == AMOTION_EVENT_TOOL_TYPE_STYLUS) || (tool == AMOTION_EVENT_TOOL_TYPE_UNKNOWN);
+
+        switch (actionMasked) {
+        case AMOTION_EVENT_ACTION_DOWN: {
+            // 上一次手势异常没收尾时，先收尾
+            if (st.phase == touchscroll::State::PASSTHROUGH) { io.AddMouseButtonEvent(0, false); }
+            st.phase = touchscroll::State::IDLE;
+
+            if (!isTouch || !st.valid) { return false; }
+            if (x < st.x0 || x >= st.x1 || y < st.y0 || y >= st.y1) { return false; }
+
+            st.phase = touchscroll::State::PENDING;
+            st.pressX = x;
+            st.pressY = y;
+            st.lastY = y;
+            // 只更新指针位置（让悬停高亮跟手），不发按下
+            io.AddMousePosEvent(x, y);
+            return true;
+        }
+        case AMOTION_EVENT_ACTION_MOVE: {
+            if (st.phase == touchscroll::State::PENDING) {
+                float dx = x - st.pressX;
+                float dy = y - st.pressY;
+                if ((dx * dx) + (dy * dy) < (st.slop * st.slop)) { return true; }
+
+                if (fabsf(dy) > fabsf(dx)) {
+                    // 竖直方向为主：开始滚动。把指针移出屏幕，避免控件保持悬停高亮
+                    st.phase = touchscroll::State::SCROLLING;
+                    st.lastY = y;
+                    io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+                }
+                else {
+                    // 水平方向为主：补发按下（位置为最初按下的点），后续按普通拖动处理
+                    st.phase = touchscroll::State::PASSTHROUGH;
+                    io.AddMousePosEvent(st.pressX, st.pressY);
+                    io.AddMouseButtonEvent(0, true);
+                    io.AddMousePosEvent(x, y);
+                }
+                return true;
+            }
+            if (st.phase == touchscroll::State::SCROLLING) {
+                // 手指向上移动，内容跟着向上，即滚动位置增大
+                st.pendingScroll += st.lastY - y;
+                st.lastY = y;
+                return true;
+            }
+            return false; // PASSTHROUGH / IDLE：交给 ImGui 处理
+        }
+        case AMOTION_EVENT_ACTION_UP:
+        case AMOTION_EVENT_ACTION_CANCEL: {
+            bool cancel = (actionMasked == AMOTION_EVENT_ACTION_CANCEL);
+            touchscroll::State::Phase phase = st.phase;
+            st.phase = touchscroll::State::IDLE;
+
+            if (phase == touchscroll::State::PENDING) {
+                // 没怎么移动：当作一次点按，补发按下 + 抬起（ImGui 会分到相邻两帧处理）
+                if (!cancel) {
+                    io.AddMousePosEvent(st.pressX, st.pressY);
+                    io.AddMouseButtonEvent(0, true);
+                    io.AddMouseButtonEvent(0, false);
+                }
+                return true;
+            }
+            if (phase == touchscroll::State::SCROLLING) {
+                return true;
+            }
+            if (phase == touchscroll::State::PASSTHROUGH) {
+                io.AddMousePosEvent(x, y);
+                io.AddMouseButtonEvent(0, false);
+                return true;
+            }
+            return false;
+        }
+        default:
+            return false;
+        }
+    }
+
     int32_t handleInputEvent(struct android_app* app, AInputEvent* inputEvent) {
+        if (handleTouchScroll(inputEvent)) { return 1; }
         return ImGui_ImplAndroid_HandleInputEvent(inputEvent);
     }
 
