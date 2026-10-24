@@ -52,19 +52,38 @@ object SdrFilePicker {
 
         val uri = data?.data
         if (resultCode != Activity.RESULT_OK || uri == null) {
-            if (requestCode == REQ_OPEN) nativeOnResultOpen("")
-            if (requestCode == REQ_SAVE) nativeOnResultSave("")
+            if (requestCode == REQ_OPEN) deliverOpen("")
+            if (requestCode == REQ_SAVE) deliverSave("")
             return
         }
 
         if (requestCode == REQ_OPEN) {
             val path = copyToCache(uri)
             if (path == null) { toast("导入失败：无法读取所选文件") }
-            nativeOnResultOpen(path ?: "")
+            deliverOpen(path ?: "")
         } else {
             val ok = copyFromCache(uri)
             toast(if (ok) "导出成功" else "导出失败：无法写入所选位置")
-            nativeOnResultSave(if (ok) uri.toString() else "")
+            deliverSave(if (ok) uri.toString() else "")
+        }
+    }
+
+    // 把结果交给原生代码。找不到原生实现时给出提示，而不是让整个程序闪退
+    private fun deliverOpen(path: String) {
+        try {
+            nativeOnResultOpen(path)
+        } catch (e: UnsatisfiedLinkError) {
+            Log.e(TAG, "nativeOnResultOpen not found", e)
+            toast("导入失败：原生回调未找到，请安装最新版本")
+        }
+    }
+
+    private fun deliverSave(result: String) {
+        try {
+            nativeOnResultSave(result)
+        } catch (e: UnsatisfiedLinkError) {
+            Log.e(TAG, "nativeOnResultSave not found", e)
+            toast("导出失败：原生回调未找到，请安装最新版本")
         }
     }
 

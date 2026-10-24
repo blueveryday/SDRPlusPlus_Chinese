@@ -142,6 +142,19 @@ private class SdrInputView(context: Context, private val sink: (Int) -> Unit, pr
 }
 
 class MainActivity : NativeActivity() {
+    companion object {
+        init {
+            // NativeActivity 自己加载的原生库不会登记给虚拟机，Java 调用 native 方法（external fun，
+            // 例如 SdrFilePicker.nativeOnResultOpen）时会找不到实现，抛出 UnsatisfiedLinkError 直接闪退。
+            // 先用 System.loadLibrary 登记；库已被加载时这个调用只是登记，不会重复初始化
+            try {
+                System.loadLibrary("sdrpp_core")
+            } catch (e: UnsatisfiedLinkError) {
+                android.util.Log.e("SDR++", "loadLibrary(sdrpp_core) failed", e)
+            }
+        }
+    }
+
     private val TAG: String = "SDR++"
     var usbManager: UsbManager? = null
     var SDR_device: UsbDevice? = null

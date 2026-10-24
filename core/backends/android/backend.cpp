@@ -615,7 +615,12 @@ namespace backend {
             std::lock_guard<std::mutex> lck(g_dialogMtx);
             pending.swap(g_pendingDialogResults);
         }
-        for (auto& fn : pending) { fn(); }
+        for (auto& fn : pending) {
+            // 回调里（例如导入书签）抛出的异常不能传出渲染线程，否则会直接闪退
+            try { fn(); }
+            catch (const std::exception& e) { flog::error("File dialog callback failed: {0}", e.what()); }
+            catch (...) { flog::error("File dialog callback failed with unknown exception"); }
+        }
     }
 
     static std::string jstringToStd(JNIEnv* env, jstring str) {

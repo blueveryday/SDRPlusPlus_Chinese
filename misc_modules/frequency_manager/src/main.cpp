@@ -1572,11 +1572,23 @@ private:
 #endif
 
     void importBookmarks(std::string path) {
-        std::ifstream fs(path);
+        // 文件格式不对、字段类型不符时 nlohmann::json 会抛异常；
+        // 在渲染线程里没人捕获就会 std::terminate 直接闪退，所以这里全部捕获并记录日志
         json importBookmarks;
-        fs >> importBookmarks;
+        try {
+            std::ifstream fs(path);
+            if (!fs.is_open()) {
+                flog::error("Could not open import file '{0}'", path);
+                return;
+            }
+            importBookmarks = json::parse(fs);
+        }
+        catch (const std::exception& e) {
+            flog::error("Failed to parse import file '{0}': {1}", path, e.what());
+            return;
+        }
 
-        if (!importBookmarks.contains("bookmarks")) {
+        if (!importBookmarks.is_object() || !importBookmarks.contains("bookmarks")) {
             flog::error("File does not contains any bookmarks");
             return;
         }
@@ -1587,27 +1599,36 @@ private:
         }
 
         // Load every bookmark using efficient deserialization
-        for (auto const [_name, bm] : importBookmarks["bookmarks"].items()) {
+        for (auto it = importBookmarks["bookmarks"].begin(); it != importBookmarks["bookmarks"].end(); ++it) {
+            const std::string _name = it.key();
+            const json& bm = it.value();
             if (bookmarks.find(_name) != bookmarks.end()) {
                 flog::warn("Bookmark with the name '{0}' already exists in list, skipping", _name);
                 continue;
             }
-            // Use performance-optimized deserialization
-            FrequencyBookmark fbm = FrequencyBookmark::fromJson(bm);
-            fbm.selected = false;
-            
-            // Validate bookmark before adding
-            if (!fbm.isValid()) {
-                flog::warn("Invalid bookmark '{0}' skipped during import", _name);
+            if (!bm.is_object()) {
+                flog::warn("Bookmark '{0}' is not an object, skipped during import", _name);
                 continue;
             }
-            
-            bookmarks[_name] = fbm;
+            try {
+                // Use performance-optimized deserialization
+                FrequencyBookmark fbm = FrequencyBookmark::fromJson(bm);
+                fbm.selected = false;
+
+                // Validate bookmark before adding
+                if (!fbm.isValid()) {
+                    flog::warn("Invalid bookmark '{0}' skipped during import", _name);
+                    continue;
+                }
+
+                bookmarks[_name] = fbm;
+            }
+            catch (const std::exception& e) {
+                flog::warn("Bookmark '{0}' skipped during import: {1}", _name, e.what());
+            }
         }
         saveByName(selectedListName);
         markScanListDirty();  // PERFORMANCE: Immediate scanner update
-
-        fs.close();
     }
 
     void exportBookmarks(std::string path) {
