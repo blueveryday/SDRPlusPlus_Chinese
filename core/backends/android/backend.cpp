@@ -32,6 +32,7 @@ namespace backend {
     // Forward declaration
     int ShowSoftKeyboardInput();
     int PollUnicodeChars();
+    int HideSoftKeyboardInput();
 
     void doPartialInit() {
         std::string root = (std::string)core::args["root"];
@@ -211,6 +212,8 @@ namespace backend {
                 static bool WantTextInputLast = false;
                 if (io.WantTextInput && !WantTextInputLast)
                 ShowSoftKeyboardInput();
+                else if (!io.WantTextInput && WantTextInputLast)
+                HideSoftKeyboardInput();
                 WantTextInputLast = io.WantTextInput;
 
                 // Render
@@ -271,6 +274,36 @@ namespace backend {
             return -3;
 
         jmethodID method_id = java_env->GetMethodID(native_activity_clazz, "showSoftInput", "()V");
+        if (method_id == NULL)
+            return -4;
+
+        java_env->CallVoidMethod(app->activity->clazz, method_id);
+
+        jni_return = java_vm->DetachCurrentThread();
+        if (jni_return != JNI_OK)
+            return -5;
+
+        return 0;
+    }
+
+    // 通知 Java 端收起软键盘（输入框失去焦点时调用）
+    int HideSoftKeyboardInput() {
+        JavaVM* java_vm = app->activity->vm;
+        JNIEnv* java_env = NULL;
+
+        jint jni_return = java_vm->GetEnv((void**)&java_env, JNI_VERSION_1_6);
+        if (jni_return == JNI_ERR)
+            return -1;
+
+        jni_return = java_vm->AttachCurrentThread(&java_env, NULL);
+        if (jni_return != JNI_OK)
+            return -2;
+
+        jclass native_activity_clazz = java_env->GetObjectClass(app->activity->clazz);
+        if (native_activity_clazz == NULL)
+            return -3;
+
+        jmethodID method_id = java_env->GetMethodID(native_activity_clazz, "hideSoftInput", "()V");
         if (method_id == NULL)
             return -4;
 
@@ -354,8 +387,20 @@ namespace backend {
         // Send the actual characters to Dear ImGui
         ImGuiIO& io = ImGui::GetIO();
         jint unicode_character;
-        while ((unicode_character = java_env->CallIntMethod(app->activity->clazz, method_id)) != 0)
-            io.AddInputCharacter(unicode_character);
+        while ((unicode_character = java_env->CallIntMethod(app->activity->clazz, method_id)) != 0) {
+            // 退格(8)和回车(10)不是可输入字符，ImGui 会丢弃它们，需要转换成按键事件
+            if (unicode_character == 8) {
+                io.AddKeyEvent(ImGuiKey_Backspace, true);
+                io.AddKeyEvent(ImGuiKey_Backspace, false);
+            }
+            else if (unicode_character == 10) {
+                io.AddKeyEvent(ImGuiKey_Enter, true);
+                io.AddKeyEvent(ImGuiKey_Enter, false);
+            }
+            else {
+                io.AddInputCharacter(unicode_character);
+            }
+        }
 
         jni_return = java_vm->DetachCurrentThread();
         if (jni_return != JNI_OK)

@@ -1,4 +1,5 @@
 #include <utils/networking.h>
+#include <utils/net_util.h>
 #include <assert.h>
 #include <utils/flog.h>
 #include <stdexcept>
@@ -119,7 +120,7 @@ namespace net {
 
         int beenWritten = 0;
         while (beenWritten < count) {
-            ret = send(_sock, (char*)buf, count, 0);
+            ret = send(_sock, (char*)&buf[beenWritten], count - beenWritten, 0);
             if (ret <= 0) {
                 {
                     std::lock_guard lck(connectionOpenMtx);
@@ -299,6 +300,7 @@ namespace net {
 
     Conn connect(std::string host, uint16_t port) {
 #ifdef _WIN32
+        // Initialize WinSock2
         if (!winsock_init) {
             WSADATA wsa;
             if (WSAStartup(MAKEWORD(2, 2), &wsa)) {
@@ -312,53 +314,58 @@ namespace net {
         signal(SIGPIPE, SIG_IGN);
 #endif
 
-        struct addrinfo hints;
-        memset(&hints, 0, sizeof(hints));
-        hints.ai_family = AF_UNSPEC;
-        hints.ai_socktype = SOCK_STREAM;
-        hints.ai_protocol = IPPROTO_TCP;
-        struct addrinfo* results = NULL;
-        std::string portStr = std::to_string(port);
-
-        if (getaddrinfo(host.c_str(), portStr.c_str(), &hints, &results) != 0 || !results) {
-            flog::error("getaddrinfo failed for host: {}", host);
-            throw std::runtime_error("Could not resolve host address");
-            return NULL;
+        // 支持 IPv4 地址、IPv6 地址（可带方括号）和域名
+        std::string target = detail::normalizeHost(host);
+        if (target.empty()) {
+            throw std::runtime_error("主机地址为空，请输入 IPv4 地址、IPv6 地址或域名");
         }
 
-#ifdef _WIN32
-        Socket sock = INVALID_SOCKET;
-#else
-        Socket sock = -1;
-#endif
+        struct addrinfo* results = detail::resolveHost(target, port, SOCK_STREAM);
+        if (!results) {
+            flog::error("Could not resolve host: {}", target);
+            throw std::runtime_error("无法解析主机名 \"" + target + "\"，请检查域名或 IP 地址是否正确");
+        }
 
+        // 依次尝试解析出的每个地址（域名可能同时有 IPv6 和 IPv4），每个地址最多等待 8 秒
+        const int connectTimeoutMs = 8000;
+        int lastErr = 0;
+        int attempts = 0;
+        bool triedV6 = false;
+        Socket sock = (Socket)-1;
+        bool connected = false;
         for (struct addrinfo* ai = results; ai; ai = ai->ai_next) {
-            sock = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+            Socket s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
 #ifdef _WIN32
-            if (sock == INVALID_SOCKET) { continue; }
+            if (s == INVALID_SOCKET) { lastErr = detail::lastSockError(); continue; }
 #else
-            if (sock < 0) { continue; }
+            if (s < 0) { lastErr = detail::lastSockError(); continue; }
 #endif
-            if (::connect(sock, ai->ai_addr, (socklen_t)ai->ai_addrlen) == 0) {
+            attempts++;
+            if (ai->ai_family == AF_INET6) { triedV6 = true; }
+
+            int err = 0;
+            if (detail::connectWithTimeout(s, ai->ai_addr, (int)ai->ai_addrlen, connectTimeoutMs, err)) {
+                sock = s;
+                connected = true;
                 break;
             }
-            
+
+            lastErr = err;
+            flog::warn("Connect attempt failed ({}): error {}", (ai->ai_family == AF_INET6) ? "IPv6" : "IPv4", err);
 #ifdef _WIN32
-            closesocket(sock);
-            sock = INVALID_SOCKET;
+            closesocket(s);
 #else
-            ::close(sock);
-            sock = -1;
+            ::close(s);
 #endif
         }
         freeaddrinfo(results);
 
-#ifdef _WIN32
-        if (sock == INVALID_SOCKET) {
-#else
-        if (sock < 0) {
-#endif
-            throw std::runtime_error("Could not connect to host");
+        if (!connected) {
+            std::string shownHost = (target.find(':') != std::string::npos) ? ("[" + target + "]") : target;
+            std::string msg = "无法连接到 " + shownHost + ":" + std::to_string(port) + " (" + detail::describeConnectError(lastErr) + ")";
+            if (attempts > 1) { msg += "，已尝试 " + std::to_string(attempts) + " 个地址"; }
+            else if (triedV6) { msg += "，仅尝试了 IPv6 地址"; }
+            throw std::runtime_error(msg);
             return NULL;
         }
 
@@ -396,7 +403,8 @@ namespace net {
 
         struct addrinfo* results = NULL;
         std::string portStr = std::to_string(port);
-        if (getaddrinfo(host.empty() ? NULL : host.c_str(), portStr.c_str(), &hints, &results) != 0 || !results) {
+        std::string bindHost = net::detail::normalizeHost(host);
+        if (getaddrinfo(bindHost.empty() ? NULL : bindHost.c_str(), portStr.c_str(), &hints, &results) != 0 || !results) {
             throw std::runtime_error("Could get address from host");
         }
 
@@ -413,7 +421,17 @@ namespace net {
             setsockopt(listenSock, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int));
 #endif
 
-            if (bind(listenSock, ai->ai_addr, ai->ai_addrlen) == 0) {
+            // IPv6 监听套接字同时接受 IPv4 连接（双栈）。Windows 默认仅 IPv6，需要显式关闭 V6ONLY
+            if (ai->ai_family == AF_INET6) {
+#ifdef _WIN32
+                DWORD v6only = 0;
+#else
+                int v6only = 0;
+#endif
+                setsockopt(listenSock, IPPROTO_IPV6, IPV6_V6ONLY, (const char*)&v6only, sizeof(v6only));
+            }
+
+            if (bind(listenSock, ai->ai_addr, (int)ai->ai_addrlen) == 0) {
                 break;
             }
 #ifdef _WIN32
