@@ -1,6 +1,16 @@
 apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
 
+// 版本号统一从仓库根目录的 version.txt 读取（例如 "v1.3.0_CE"），避免与源码版本不一致
+def sdrppVersionText = file('../../version.txt').text.trim().replaceFirst(/^[vV]/, '')
+def sdrppVersionMatch = (sdrppVersionText =~ /^(\d+)\.(\d+)\.(\d+)/)
+def sdrppVersionCode = 1
+if (sdrppVersionMatch.find()) {
+    sdrppVersionCode = sdrppVersionMatch.group(1).toInteger() * 10000 +
+                       sdrppVersionMatch.group(2).toInteger() * 100 +
+                       sdrppVersionMatch.group(3).toInteger()
+}
+
 android {
     compileSdkVersion 28
     buildToolsVersion "30.0.3"
@@ -9,8 +19,8 @@ android {
         applicationId "org.sdrpp.sdrpp"
         minSdkVersion 28
         targetSdkVersion 28
-        versionCode 1
-        versionName "1.2.1"
+        versionCode sdrppVersionCode
+        versionName sdrppVersionText
 
         externalNativeBuild {
             cmake {

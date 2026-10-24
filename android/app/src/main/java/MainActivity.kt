@@ -246,6 +246,16 @@ class MainActivity : NativeActivity() {
         hideSystemBars()
     }
 
+    // 供原生代码调用：打开系统文件选择器（导入）
+    fun openFilePicker() {
+        runOnUiThread { SdrFilePicker.openDocument() }
+    }
+
+    // 供原生代码调用：让用户选择保存位置，并把缓存文件复制过去（导出）
+    fun saveFilePicker(cachePath: String, defaultName: String) {
+        runOnUiThread { SdrFilePicker.saveDocument(cachePath, defaultName) }
+    }
+
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         SdrFilePicker.onActivityResult(requestCode, resultCode, data)

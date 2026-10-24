@@ -15,6 +15,9 @@
 #include <gui/style.h>
 #include <gui/menus/theme.h>
 #include <filesystem>
+#include <functional>
+#include <mutex>
+#include <vector>
 
 // Credit to the ImGui android OpenGL3 example for a lot of this code!
 
@@ -33,6 +36,7 @@ namespace backend {
     int ShowSoftKeyboardInput();
     int PollUnicodeChars();
     int HideSoftKeyboardInput();
+    void ProcessPendingDialogResults();
 
     void doPartialInit() {
         std::string root = (std::string)core::args["root"];
@@ -207,6 +211,9 @@ namespace backend {
                 // Poll Unicode characters via JNI
                 // FIXME: do not call this every frame because of JNI overhead
                 PollUnicodeChars();
+
+                // 在渲染线程处理文件选择器返回的结果（导入/导出）
+                ProcessPendingDialogResults();
 
                 // Open on-screen (soft) input if requested by Dear ImGui
                 static bool WantTextInputLast = false;
@@ -540,71 +547,103 @@ extern "C" {
 namespace backend {
     static std::function<void(std::string)> g_openCallback = nullptr;
     static std::function<void(std::string)> g_saveCallback = nullptr;
+    static std::mutex g_dialogMtx;
+    static std::vector<std::function<void()>> g_pendingDialogResults;
 
-    void openFileDialog(std::function<void(std::string)> callback) {
-        g_openCallback = callback;
+    // 在 MainActivity 实例上调用 Java 方法。
+    // 注意：不能在原生线程里用 FindClass 查找应用自己的类（原生线程只能使用系统类加载器，
+    // 会抛出 ClassNotFoundException 导致闪退），所以通过 MainActivity 对象转发给 Java 端。
+    template <typename F>
+    static void withActivity(F fn) {
         JavaVM* java_vm = app->activity->vm;
         JNIEnv* java_env = NULL;
-        jint jni_return = java_vm->GetEnv((void**)&java_env, JNI_VERSION_1_6);
-        if (jni_return == JNI_ERR) return;
-        jni_return = java_vm->AttachCurrentThread(&java_env, NULL);
-        if (jni_return != JNI_OK) return;
-
-        jclass clazz = java_env->FindClass("org/sdrpp/sdrpp/SdrFilePicker");
-        if (clazz) {
-            jfieldID instanceField = java_env->GetStaticFieldID(clazz, "INSTANCE", "Lorg/sdrpp/sdrpp/SdrFilePicker;");
-            jobject instance = java_env->GetStaticObjectField(clazz, instanceField);
-            jmethodID method = java_env->GetMethodID(clazz, "openDocument", "()V");
-            if (method) java_env->CallVoidMethod(instance, method);
-            java_env->DeleteLocalRef(clazz);
+        bool attached = false;
+        jint r = java_vm->GetEnv((void**)&java_env, JNI_VERSION_1_6);
+        if (r == JNI_EDETACHED) {
+            if (java_vm->AttachCurrentThread(&java_env, NULL) != JNI_OK) { return; }
+            attached = true;
         }
-        java_vm->DetachCurrentThread();
+        else if (r != JNI_OK) {
+            return;
+        }
+
+        jclass cls = java_env->GetObjectClass(app->activity->clazz);
+        if (cls) {
+            fn(java_env, app->activity->clazz, cls);
+            java_env->DeleteLocalRef(cls);
+        }
+        if (java_env->ExceptionCheck()) {
+            java_env->ExceptionDescribe();
+            java_env->ExceptionClear();
+        }
+        if (attached) { java_vm->DetachCurrentThread(); }
+    }
+
+    void openFileDialog(std::function<void(std::string)> callback) {
+        {
+            std::lock_guard<std::mutex> lck(g_dialogMtx);
+            g_openCallback = callback;
+        }
+        withActivity([](JNIEnv* env, jobject activity, jclass cls) {
+            jmethodID method = env->GetMethodID(cls, "openFilePicker", "()V");
+            if (method) { env->CallVoidMethod(activity, method); }
+        });
     }
 
     void saveFileDialog(std::string cacheFilePath, std::string defaultName, std::function<void(std::string)> callback) {
-        g_saveCallback = callback;
-        JavaVM* java_vm = app->activity->vm;
-        JNIEnv* java_env = NULL;
-        jint jni_return = java_vm->GetEnv((void**)&java_env, JNI_VERSION_1_6);
-        if (jni_return == JNI_ERR) return;
-        jni_return = java_vm->AttachCurrentThread(&java_env, NULL);
-        if (jni_return != JNI_OK) return;
-
-        jclass clazz = java_env->FindClass("org/sdrpp/sdrpp/SdrFilePicker");
-        if (clazz) {
-            jfieldID instanceField = java_env->GetStaticFieldID(clazz, "INSTANCE", "Lorg/sdrpp/sdrpp/SdrFilePicker;");
-            jobject instance = java_env->GetStaticObjectField(clazz, instanceField);
-            jmethodID method = java_env->GetMethodID(clazz, "saveDocument", "(Ljava/lang/String;Ljava/lang/String;)V");
-            if (method) {
-                jstring jPath = java_env->NewStringUTF(cacheFilePath.c_str());
-                jstring jName = java_env->NewStringUTF(defaultName.c_str());
-                java_env->CallVoidMethod(instance, method, jPath, jName);
-                java_env->DeleteLocalRef(jPath);
-                java_env->DeleteLocalRef(jName);
-            }
-            java_env->DeleteLocalRef(clazz);
+        {
+            std::lock_guard<std::mutex> lck(g_dialogMtx);
+            g_saveCallback = callback;
         }
-        java_vm->DetachCurrentThread();
+        withActivity([&](JNIEnv* env, jobject activity, jclass cls) {
+            jmethodID method = env->GetMethodID(cls, "saveFilePicker", "(Ljava/lang/String;Ljava/lang/String;)V");
+            if (method) {
+                jstring jPath = env->NewStringUTF(cacheFilePath.c_str());
+                jstring jName = env->NewStringUTF(defaultName.c_str());
+                env->CallVoidMethod(activity, method, jPath, jName);
+                env->DeleteLocalRef(jPath);
+                env->DeleteLocalRef(jName);
+            }
+        });
+    }
+
+    // 文件选择结果由 Java 的界面线程回调进来；真正的处理（导入书签会修改界面正在使用的数据）
+    // 放到渲染线程中执行，避免和界面绘制同时访问数据导致崩溃
+    void ProcessPendingDialogResults() {
+        std::vector<std::function<void()>> pending;
+        {
+            std::lock_guard<std::mutex> lck(g_dialogMtx);
+            pending.swap(g_pendingDialogResults);
+        }
+        for (auto& fn : pending) { fn(); }
+    }
+
+    static std::string jstringToStd(JNIEnv* env, jstring str) {
+        if (!str) { return ""; }
+        const char* chars = env->GetStringUTFChars(str, nullptr);
+        std::string result(chars ? chars : "");
+        if (chars) { env->ReleaseStringUTFChars(str, chars); }
+        return result;
     }
 }
 
 extern "C" JNIEXPORT void JNICALL Java_org_sdrpp_sdrpp_SdrFilePicker_nativeOnResultOpen(JNIEnv* env, jobject thiz, jstring path) {
-    const char* str = env->GetStringUTFChars(path, nullptr);
-    std::string result(str);
-    env->ReleaseStringUTFChars(path, str);
+    std::string result = backend::jstringToStd(env, path);
+    std::lock_guard<std::mutex> lck(backend::g_dialogMtx);
     if (backend::g_openCallback) {
-        backend::g_openCallback(result);
-        backend::g_openCallback = nullptr; 
+        auto cb = backend::g_openCallback;
+        backend::g_openCallback = nullptr;
+        backend::g_pendingDialogResults.push_back([cb, result]() { cb(result); });
     }
 }
 
 extern "C" JNIEXPORT void JNICALL Java_org_sdrpp_sdrpp_SdrFilePicker_nativeOnResultSave(JNIEnv* env, jobject thiz, jstring result) {
-    const char* str = env->GetStringUTFChars(result, nullptr);
-    std::string res(str);
-    env->ReleaseStringUTFChars(result, str);
+    std::string res = backend::jstringToStd(env, result);
+    std::lock_guard<std::mutex> lck(backend::g_dialogMtx);
     if (backend::g_saveCallback) {
-        backend::g_saveCallback(res);
-        backend::g_saveCallback = nullptr; 
+        auto cb = backend::g_saveCallback;
+        backend::g_saveCallback = nullptr;
+        backend::g_pendingDialogResults.push_back([cb, res]() { cb(res); });
     }
 }
 #endif
