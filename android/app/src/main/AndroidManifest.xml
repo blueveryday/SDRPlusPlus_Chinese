@@ -14,7 +14,7 @@
             android:name="org.sdrpp.sdrpp.MainActivity"
             android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
             android:screenOrientation="sensorLandscape"
-            android:windowSoftInputMode="adjustPan|stateHidden"
+            android:windowSoftInputMode="adjustResize|stateHidden"
             android:exported="true"
             android:configChanges="orientation|keyboardHidden|screenSize">
             <meta-data android:name="android.app.lib_name" android:value="sdrpp_core" />
@@ -36,4 +36,5 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 </manifest>
