@@ -11,7 +11,11 @@
 #include <signal_path/signal_path.h>
 #include <vector>
 #include <gui/tuner.h>
+#ifdef __ANDROID__
+#include <backend.h>
+#else
 #include <gui/file_dialogs.h>
+#endif
 #include <utils/freq_formatting.h>
 #include <gui/dialogs/dialog_box.h>
 #include <fstream>
@@ -1316,13 +1320,36 @@ private:
         ImGui::TableNextRow();
 
         ImGui::TableSetColumnIndex(0);
+#ifdef __ANDROID__
+        if (ImGui::Button(("导入##_freq_mgr_imp_" + _this->name).c_str(), ImVec2(ImGui::GetContentRegionAvail().x, 0))) {
+            backend::openFileDialog([_this](std::string path) {
+                if (!path.empty() && _this->listNames.size() > 0) {
+                    _this->importBookmarks(path);
+                }
+            });
+        }
+#else
         if (ImGui::Button(("导入##_freq_mgr_imp_" + _this->name).c_str(), ImVec2(ImGui::GetContentRegionAvail().x, 0)) && !_this->importOpen) {
             _this->importOpen = true;
             _this->importDialog = new pfd::open_file("导入书签", "", { "JSON 文件 (*.json)", "*.json", "所有文件", "*" }, pfd::opt::multiselect);
         }
+#endif
 
         ImGui::TableSetColumnIndex(1);
         if (selectedNames.size() == 0 && _this->selectedListName != "") { style::beginDisabled(); }
+#ifdef __ANDROID__
+        if (ImGui::Button(("导出##_freq_mgr_exp_" + _this->name).c_str(), ImVec2(ImGui::GetContentRegionAvail().x, 0))) {
+            _this->exportedBookmarks = json::object();
+            config.acquire();
+            for (auto& _name : selectedNames) {
+                _this->exportedBookmarks["bookmarks"][_name] = config.conf["lists"][_this->selectedListName]["bookmarks"][_name];
+            }
+            config.release();
+            std::string cachePath = backend::getAppFilesDir() + "/export_temp.json";
+            _this->exportBookmarks(cachePath);
+            backend::saveFileDialog(cachePath, "bookmarks.json", [](std::string result) {});
+        }
+#else
         if (ImGui::Button(("导出##_freq_mgr_exp_" + _this->name).c_str(), ImVec2(ImGui::GetContentRegionAvail().x, 0)) && !_this->exportOpen) {
             _this->exportedBookmarks = json::object();
             config.acquire();
@@ -1333,6 +1360,7 @@ private:
             _this->exportOpen = true;
             _this->exportDialog = new pfd::save_file("导出书签", "", { "JSON 文件 (*.json)", "*.json", "所有文件", "*" });
         }
+#endif
         if (selectedNames.size() == 0 && _this->selectedListName != "") { style::endDisabled(); }
         ImGui::EndTable();
 
@@ -1370,6 +1398,7 @@ private:
             _this->selectListsOpen = _this->selectListsDialog();
         }
 
+#ifndef __ANDROID__
         // Handle import and export
         if (_this->importOpen && _this->importDialog->ready()) {
             _this->importOpen = false;
@@ -1387,7 +1416,8 @@ private:
             }
             delete _this->exportDialog;
         }
-    }
+#endif
+	}
 
     static void fftRedraw(ImGui::WaterFall::FFTRedrawArgs args, void* ctx) {
         FrequencyManagerModule* _this = (FrequencyManagerModule*)ctx;
@@ -1536,15 +1566,29 @@ private:
     json exportedBookmarks;
     bool importOpen = false;
     bool exportOpen = false;
+#ifndef __ANDROID__
     pfd::open_file* importDialog;
     pfd::save_file* exportDialog;
+#endif
 
     void importBookmarks(std::string path) {
-        std::ifstream fs(path);
+        // 文件格式不对、字段类型不符时 nlohmann::json 会抛异常；
+        // 在渲染线程里没人捕获就会 std::terminate 直接闪退，所以这里全部捕获并记录日志
         json importBookmarks;
-        fs >> importBookmarks;
+        try {
+            std::ifstream fs(path);
+            if (!fs.is_open()) {
+                flog::error("Could not open import file '{0}'", path);
+                return;
+            }
+            importBookmarks = json::parse(fs);
+        }
+        catch (const std::exception& e) {
+            flog::error("Failed to parse import file '{0}': {1}", path, e.what());
+            return;
+        }
 
-        if (!importBookmarks.contains("bookmarks")) {
+        if (!importBookmarks.is_object() || !importBookmarks.contains("bookmarks")) {
             flog::error("File does not contains any bookmarks");
             return;
         }
@@ -1555,27 +1599,36 @@ private:
         }
 
         // Load every bookmark using efficient deserialization
-        for (auto const [_name, bm] : importBookmarks["bookmarks"].items()) {
+        for (auto it = importBookmarks["bookmarks"].begin(); it != importBookmarks["bookmarks"].end(); ++it) {
+            const std::string _name = it.key();
+            const json& bm = it.value();
             if (bookmarks.find(_name) != bookmarks.end()) {
                 flog::warn("Bookmark with the name '{0}' already exists in list, skipping", _name);
                 continue;
             }
-            // Use performance-optimized deserialization
-            FrequencyBookmark fbm = FrequencyBookmark::fromJson(bm);
-            fbm.selected = false;
-            
-            // Validate bookmark before adding
-            if (!fbm.isValid()) {
-                flog::warn("Invalid bookmark '{0}' skipped during import", _name);
+            if (!bm.is_object()) {
+                flog::warn("Bookmark '{0}' is not an object, skipped during import", _name);
                 continue;
             }
-            
-            bookmarks[_name] = fbm;
+            try {
+                // Use performance-optimized deserialization
+                FrequencyBookmark fbm = FrequencyBookmark::fromJson(bm);
+                fbm.selected = false;
+
+                // Validate bookmark before adding
+                if (!fbm.isValid()) {
+                    flog::warn("Invalid bookmark '{0}' skipped during import", _name);
+                    continue;
+                }
+
+                bookmarks[_name] = fbm;
+            }
+            catch (const std::exception& e) {
+                flog::warn("Bookmark '{0}' skipped during import: {1}", _name, e.what());
+            }
         }
         saveByName(selectedListName);
         markScanListDirty();  // PERFORMANCE: Immediate scanner update
-
-        fs.close();
     }
 
     void exportBookmarks(std::string path) {

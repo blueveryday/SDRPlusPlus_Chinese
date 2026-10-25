@@ -1,7 +1,9 @@
 #include <utils/networking.h>
+#include <utils/net_util.h>
 #include <assert.h>
 #include <utils/flog.h>
 #include <stdexcept>
+#include <cstring>
 
 namespace net {
 
@@ -24,14 +26,12 @@ namespace net {
 
     void ConnClass::close() {
         std::lock_guard lck(closeMtx);
-        // Set stopWorkers to true
         {
             std::lock_guard lck1(readQueueMtx);
             std::lock_guard lck2(writeQueueMtx);
             stopWorkers = true;
         }
 
-        // Notify the workers of the change
         readQueueCnd.notify_all();
         writeQueueCnd.notify_all();
 
@@ -44,7 +44,6 @@ namespace net {
 #endif
         }
 
-        // Wait for the theads to terminate
         if (readWorkerThread.joinable()) { readWorkerThread.join(); }
         if (writeWorkerThread.joinable()) { writeWorkerThread.join(); }
 
@@ -97,10 +96,8 @@ namespace net {
             }
 
             if (!enforceSize) { return ret; }
-
             beenRead += ret;
         }
-
         return beenRead;
     }
 
@@ -123,7 +120,7 @@ namespace net {
 
         int beenWritten = 0;
         while (beenWritten < count) {
-            ret = send(_sock, (char*)buf, count, 0);
+            ret = send(_sock, (char*)&buf[beenWritten], count - beenWritten, 0);
             if (ret <= 0) {
                 {
                     std::lock_guard lck(connectionOpenMtx);
@@ -134,13 +131,11 @@ namespace net {
             }
             beenWritten += ret;
         }
-        
         return true;
     }
 
     void ConnClass::readAsync(int count, uint8_t* buf, void (*handler)(int count, uint8_t* buf, void* ctx), void* ctx, bool enforceSize) {
         if (!connectionOpen) { return; }
-        // Create entry
         ConnReadEntry entry;
         entry.count = count;
         entry.buf = buf;
@@ -148,46 +143,36 @@ namespace net {
         entry.ctx = ctx;
         entry.enforceSize = enforceSize;
 
-        // Add entry to queue
         {
             std::lock_guard lck(readQueueMtx);
             readQueue.push_back(entry);
         }
-
-        // Notify read worker
         readQueueCnd.notify_all();
     }
 
     void ConnClass::writeAsync(int count, uint8_t* buf) {
         if (!connectionOpen) { return; }
-        // Create entry
         ConnWriteEntry entry;
         entry.count = count;
         entry.buf = buf;
 
-        // Add entry to queue
         {
             std::lock_guard lck(writeQueueMtx);
             writeQueue.push_back(entry);
         }
-
-        // Notify write worker
         writeQueueCnd.notify_all();
     }
 
     void ConnClass::readWorker() {
         while (true) {
-            // Wait for wakeup and exit if it's for terminating the thread
             std::unique_lock lck(readQueueMtx);
             readQueueCnd.wait(lck, [this]() { return (readQueue.size() > 0 || stopWorkers); });
             if (stopWorkers || !connectionOpen) { return; }
 
-            // Pop first element off the list
             ConnReadEntry entry = readQueue[0];
             readQueue.erase(readQueue.begin());
             lck.unlock();
 
-            // Read from socket and send data to the handler
             int ret = read(entry.count, entry.buf, entry.enforceSize);
             if (ret <= 0) {
                 {
@@ -203,17 +188,14 @@ namespace net {
 
     void ConnClass::writeWorker() {
         while (true) {
-            // Wait for wakeup and exit if it's for terminating the thread
             std::unique_lock lck(writeQueueMtx);
             writeQueueCnd.wait(lck, [this]() { return (writeQueue.size() > 0 || stopWorkers); });
             if (stopWorkers || !connectionOpen) { return; }
 
-            // Pop first element off the list
             ConnWriteEntry entry = writeQueue[0];
             writeQueue.erase(writeQueue.begin());
             lck.unlock();
 
-            // Write to socket
             if (!write(entry.count, entry.buf)) {
                 {
                     std::lock_guard lck(connectionOpenMtx);
@@ -224,7 +206,6 @@ namespace net {
             }
         }
     }
-
 
     ListenerClass::ListenerClass(Socket listenSock) {
         sock = listenSock;
@@ -241,7 +222,6 @@ namespace net {
         std::lock_guard lck(acceptMtx);
         Socket _sock;
 
-        // Accept socket
         _sock = ::accept(sock, NULL, NULL);
 #ifdef _WIN32
         if (_sock < 0 || _sock == SOCKET_ERROR) {
@@ -258,18 +238,14 @@ namespace net {
 
     void ListenerClass::acceptAsync(void (*handler)(Conn conn, void* ctx), void* ctx) {
         if (!listening) { return; }
-        // Create entry
         ListenerAcceptEntry entry;
         entry.handler = handler;
         entry.ctx = ctx;
 
-        // Add entry to queue
         {
             std::lock_guard lck(acceptQueueMtx);
             acceptQueue.push_back(entry);
         }
-
-        // Notify write worker
         acceptQueueCnd.notify_all();
     }
 
@@ -290,8 +266,6 @@ namespace net {
         }
 
         if (acceptWorkerThread.joinable()) { acceptWorkerThread.join(); }
-
-
         listening = false;
     }
 
@@ -301,17 +275,14 @@ namespace net {
 
     void ListenerClass::worker() {
         while (true) {
-            // Wait for wakeup and exit if it's for terminating the thread
             std::unique_lock lck(acceptQueueMtx);
             acceptQueueCnd.wait(lck, [this]() { return (acceptQueue.size() > 0 || stopWorker); });
             if (stopWorker || !listening) { return; }
 
-            // Pop first element off the list
             ListenerAcceptEntry entry = acceptQueue[0];
             acceptQueue.erase(acceptQueue.begin());
             lck.unlock();
 
-            // Read from socket and send data to the handler
             try {
                 Conn client = accept();
                 if (!client) {
@@ -327,10 +298,7 @@ namespace net {
         }
     }
 
-
     Conn connect(std::string host, uint16_t port) {
-        Socket sock;
-
 #ifdef _WIN32
         // Initialize WinSock2
         if (!winsock_init) {
@@ -346,30 +314,58 @@ namespace net {
         signal(SIGPIPE, SIG_IGN);
 #endif
 
-        // Create a socket
-        sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (sock < 0) {
-            throw std::runtime_error("Could not create socket");
-            return NULL;
+        // 支持 IPv4 地址、IPv6 地址（可带方括号）和域名
+        std::string target = detail::normalizeHost(host);
+        if (target.empty()) {
+            throw std::runtime_error("主机地址为空，请输入 IPv4 地址、IPv6 地址或域名");
         }
 
-        // Get address from hostname/ip
-        hostent* remoteHost = gethostbyname(host.c_str());
-        if (remoteHost == NULL || remoteHost->h_addr_list[0] == NULL) {
-            throw std::runtime_error("Could get address from host");
-            return NULL;
+        struct addrinfo* results = detail::resolveHost(target, port, SOCK_STREAM);
+        if (!results) {
+            flog::error("Could not resolve host: {}", target);
+            throw std::runtime_error("无法解析主机名 \"" + target + "\"，请检查域名或 IP 地址是否正确");
         }
-        uint32_t* naddr = (uint32_t*)remoteHost->h_addr_list[0];
 
-        // Create host address
-        struct sockaddr_in addr;
-        addr.sin_addr.s_addr = *naddr;
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(port);
+        // 依次尝试解析出的每个地址（域名可能同时有 IPv6 和 IPv4），每个地址最多等待 8 秒
+        const int connectTimeoutMs = 8000;
+        int lastErr = 0;
+        int attempts = 0;
+        bool triedV6 = false;
+        Socket sock = (Socket)-1;
+        bool connected = false;
+        for (struct addrinfo* ai = results; ai; ai = ai->ai_next) {
+            Socket s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+#ifdef _WIN32
+            if (s == INVALID_SOCKET) { lastErr = detail::lastSockError(); continue; }
+#else
+            if (s < 0) { lastErr = detail::lastSockError(); continue; }
+#endif
+            attempts++;
+            if (ai->ai_family == AF_INET6) { triedV6 = true; }
 
-        // Connect to host
-        if (::connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-            throw std::runtime_error("Could not connect to host");
+            int err = 0;
+            if (detail::connectWithTimeout(s, ai->ai_addr, (int)ai->ai_addrlen, connectTimeoutMs, err)) {
+                sock = s;
+                connected = true;
+                break;
+            }
+
+            lastErr = err;
+            flog::warn("Connect attempt failed ({}): error {}", (ai->ai_family == AF_INET6) ? "IPv6" : "IPv4", err);
+#ifdef _WIN32
+            closesocket(s);
+#else
+            ::close(s);
+#endif
+        }
+        freeaddrinfo(results);
+
+        if (!connected) {
+            std::string shownHost = (target.find(':') != std::string::npos) ? ("[" + target + "]") : target;
+            std::string msg = "无法连接到 " + shownHost + ":" + std::to_string(port) + " (" + detail::describeConnectError(lastErr) + ")";
+            if (attempts > 1) { msg += "，已尝试 " + std::to_string(attempts) + " 个地址"; }
+            else if (triedV6) { msg += "，仅尝试了 IPv6 地址"; }
+            throw std::runtime_error(msg);
             return NULL;
         }
 
@@ -377,10 +373,14 @@ namespace net {
     }
 
     Listener listen(std::string host, uint16_t port) {
-        Socket listenSock;
 
 #ifdef _WIN32
-        // Initialize WinSock2
+        Socket listenSock = INVALID_SOCKET;
+#else
+        Socket listenSock = -1;
+#endif
+
+#ifdef _WIN32
         if (!winsock_init) {
             WSADATA wsa;
             if (WSAStartup(MAKEWORD(2, 2), &wsa)) {
@@ -394,59 +394,80 @@ namespace net {
         signal(SIGPIPE, SIG_IGN);
 #endif
 
-        // Create a socket
-        listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (listenSock < 0) {
-            throw std::runtime_error("Could not create socket");
-            return NULL;
+        struct addrinfo hints;
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_protocol = IPPROTO_TCP;
+        hints.ai_flags = AI_PASSIVE;
+
+        struct addrinfo* results = NULL;
+        std::string portStr = std::to_string(port);
+        std::string bindHost = net::detail::normalizeHost(host);
+        if (getaddrinfo(bindHost.empty() ? NULL : bindHost.c_str(), portStr.c_str(), &hints, &results) != 0 || !results) {
+            throw std::runtime_error("Could get address from host");
         }
 
-#ifndef _WIN32
-        // Allow port reusing if the app was killed or crashed
-        // and the socket is stuck in TIME_WAIT state.
-        // This option has a different meaning on Windows,
-        // so we use it only for non-Windows systems
-        int enable = 1;
-        if (setsockopt(listenSock, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0) {
-            throw std::runtime_error("Could not configure socket");
-            return NULL;
-        }
+        for (struct addrinfo* ai = results; ai; ai = ai->ai_next) {
+            listenSock = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+#ifdef _WIN32
+            if (listenSock == INVALID_SOCKET) { continue; }
+#else
+            if (listenSock < 0) { continue; }
 #endif
 
-        // Get address from hostname/ip
-        hostent* remoteHost = gethostbyname(host.c_str());
-        if (remoteHost == NULL || remoteHost->h_addr_list[0] == NULL) {
-            throw std::runtime_error("Could get address from host");
-            return NULL;
+#ifndef _WIN32
+            int enable = 1;
+            setsockopt(listenSock, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int));
+#endif
+
+            // IPv6 监听套接字同时接受 IPv4 连接（双栈）。Windows 默认仅 IPv6，需要显式关闭 V6ONLY
+            if (ai->ai_family == AF_INET6) {
+#ifdef _WIN32
+                DWORD v6only = 0;
+#else
+                int v6only = 0;
+#endif
+                setsockopt(listenSock, IPPROTO_IPV6, IPV6_V6ONLY, (const char*)&v6only, sizeof(v6only));
+            }
+
+            if (bind(listenSock, ai->ai_addr, (int)ai->ai_addrlen) == 0) {
+                break;
+            }
+#ifdef _WIN32
+            closesocket(listenSock);
+            listenSock = INVALID_SOCKET;
+#else
+            ::close(listenSock);
+            listenSock = -1;
+#endif
         }
-        uint32_t* naddr = (uint32_t*)remoteHost->h_addr_list[0];
+        freeaddrinfo(results);
 
-        // Create host address
-        struct sockaddr_in addr;
-        addr.sin_addr.s_addr = *naddr;
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(port);
-
-        // Bind socket
-        if (bind(listenSock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+#ifdef _WIN32
+        if (listenSock == INVALID_SOCKET) {
+#else
+        if (listenSock < 0) {
+#endif
             throw std::runtime_error("Could not bind socket");
-            return NULL;
         }
 
-        // Listen
         if (::listen(listenSock, SOMAXCONN) != 0) {
             throw std::runtime_error("Could not listen");
-            return NULL;
         }
 
         return Listener(new ListenerClass(listenSock));
     }
 
     Conn openUDP(std::string host, uint16_t port, std::string remoteHost, uint16_t remotePort, bool bindSocket) {
-        Socket sock;
 
 #ifdef _WIN32
-        // Initialize WinSock2
+        Socket sock = INVALID_SOCKET;
+#else
+        Socket sock = -1;
+#endif
+
+#ifdef _WIN32
         if (!winsock_init) {
             WSADATA wsa;
             if (WSAStartup(MAKEWORD(2, 2), &wsa)) {
@@ -460,48 +481,57 @@ namespace net {
         signal(SIGPIPE, SIG_IGN);
 #endif
 
-        // Create a socket
-        sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        struct addrinfo hints;
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_INET; 
+        hints.ai_socktype = SOCK_DGRAM;
+        hints.ai_protocol = IPPROTO_UDP;
+        hints.ai_flags = AI_PASSIVE;
+
+        struct addrinfo* results = NULL;
+        struct addrinfo* remoteResults = NULL;
+        std::string portStr = std::to_string(port);
+        std::string remotePortStr = std::to_string(remotePort);
+
+        if (getaddrinfo(host.empty() ? NULL : host.c_str(), portStr.c_str(), &hints, &results) != 0 || !results) {
+            throw std::runtime_error("Could get address from host");
+        }
+        
+        hints.ai_flags = 0;
+        if (getaddrinfo(remoteHost.c_str(), remotePortStr.c_str(), &hints, &remoteResults) != 0 || !remoteResults) {
+            freeaddrinfo(results);
+            throw std::runtime_error("Could get address from host");
+        }
+
+        sock = socket(results->ai_family, results->ai_socktype, results->ai_protocol);
+#ifdef _WIN32
+        if (sock == INVALID_SOCKET) {
+#else
         if (sock < 0) {
+#endif
+            freeaddrinfo(results);
+            freeaddrinfo(remoteResults);
             throw std::runtime_error("Could not create socket");
-            return NULL;
         }
 
-        // Get address from local hostname/ip
-        hostent* _host = gethostbyname(host.c_str());
-        if (_host == NULL || _host->h_addr_list[0] == NULL) {
-            throw std::runtime_error("Could get address from host");
-            return NULL;
-        }
-
-        // Get address from remote hostname/ip
-        hostent* _remoteHost = gethostbyname(remoteHost.c_str());
-        if (_remoteHost == NULL || _remoteHost->h_addr_list[0] == NULL) {
-            throw std::runtime_error("Could get address from host");
-            return NULL;
-        }
-        uint32_t* rnaddr = (uint32_t*)_remoteHost->h_addr_list[0];
-
-        // Create host address
-        struct sockaddr_in addr;
-        addr.sin_addr.s_addr = INADDR_ANY; //*naddr;
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(port);
-
-        // Create remote host address
         struct sockaddr_in raddr;
-        raddr.sin_addr.s_addr = *rnaddr;
-        raddr.sin_family = AF_INET;
-        raddr.sin_port = htons(remotePort);
+        memcpy(&raddr, remoteResults->ai_addr, sizeof(struct sockaddr_in));
 
-        // Bind socket
         if (bindSocket) {
-            int err = bind(sock, (struct sockaddr*)&addr, sizeof(addr));
-            if (err < 0) {
+            if (bind(sock, results->ai_addr, results->ai_addrlen) < 0) {
+                freeaddrinfo(results);
+                freeaddrinfo(remoteResults);
+#ifdef _WIN32
+                closesocket(sock);
+#else
+                ::close(sock);
+#endif
                 throw std::runtime_error("Could not bind socket");
-                return NULL;
             }
         }
+
+        freeaddrinfo(results);
+        freeaddrinfo(remoteResults);
 
         return Conn(new ConnClass(sock, raddr, true));
     }

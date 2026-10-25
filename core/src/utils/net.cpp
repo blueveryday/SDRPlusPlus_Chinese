@@ -1,4 +1,7 @@
 #include "net.h"
+#include "net_util.h"
+#include <algorithm>
+#include <utils/flog.h>
 #include <string.h>
 #include <codecvt>
 #include <stdexcept>
@@ -60,53 +63,90 @@ namespace net {
 
     Address::Address() {
         memset(&addr, 0, sizeof(addr));
+        addr.ss_family = AF_INET;
     }
 
     Address::Address(const std::string& host, int port) {
         // Initialize WSA if needed
         init();
-        
-        // Lookup host
-        hostent* ent = gethostbyname(host.c_str());
-        if (!ent || !ent->h_addr_list[0]) {
+
+        // 支持 IPv4 地址、IPv6 地址（可带方括号）和域名
+        std::string target = detail::normalizeHost(host);
+        struct addrinfo* results = target.empty() ? NULL : detail::resolveHost(target, port, SOCK_STREAM);
+        if (!results) {
             throw std::runtime_error("Unknown host");
         }
-        
-        // Build address
+
+        // 使用解析结果中的第一个地址（顺序遵循系统策略，通常 IPv6 优先）
         memset(&addr, 0, sizeof(addr));
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = *(uint32_t*)ent->h_addr_list[0];
-        addr.sin_port = htons(port);
+        memcpy(&addr, results->ai_addr, std::min<size_t>((size_t)results->ai_addrlen, sizeof(addr)));
+        freeaddrinfo(results);
     }
 
     Address::Address(IP_t ip, int port) {
         memset(&addr, 0, sizeof(addr));
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = htonl(ip);
-        addr.sin_port = htons(port);
+        struct sockaddr_in* a4 = (struct sockaddr_in*)&addr;
+        a4->sin_family = AF_INET;
+        a4->sin_addr.s_addr = htonl(ip);
+        a4->sin_port = htons(port);
     }
 
     std::string Address::getIPStr() const {
         char buf[128];
+        if (isIPv6()) {
+            const struct sockaddr_in6* a6 = (const struct sockaddr_in6*)&addr;
+            if (!inet_ntop(AF_INET6, (const void*)&a6->sin6_addr, buf, sizeof(buf))) { return "::"; }
+            return buf;
+        }
         IP_t ip = getIP();
-        sprintf(buf, "%d.%d.%d.%d", (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
+        snprintf(buf, sizeof(buf), "%d.%d.%d.%d", (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
         return buf;
     }
 
     IP_t Address::getIP() const {
-        return htonl(addr.sin_addr.s_addr);
+        // 仅对 IPv4 地址有意义，IPv6 地址返回 0
+        if (isIPv6()) { return 0; }
+        return ntohl(((const struct sockaddr_in*)&addr)->sin_addr.s_addr);
     }
 
     void Address::setIP(IP_t ip) {
-        addr.sin_addr.s_addr = htonl(ip);
+        // 设置 IPv4 地址（如果原来是 IPv6，会转换为 IPv4 并保留端口）
+        int port = getPort();
+        memset(&addr, 0, sizeof(addr));
+        struct sockaddr_in* a4 = (struct sockaddr_in*)&addr;
+        a4->sin_family = AF_INET;
+        a4->sin_addr.s_addr = htonl(ip);
+        a4->sin_port = htons(port);
     }
 
     int Address::getPort() const {
-        return htons(addr.sin_port);
+        if (isIPv6()) { return ntohs(((const struct sockaddr_in6*)&addr)->sin6_port); }
+        return ntohs(((const struct sockaddr_in*)&addr)->sin_port);
     }
 
     void Address::setPort(int port) {
-        addr.sin_port = htons(port);
+        if (isIPv6()) { ((struct sockaddr_in6*)&addr)->sin6_port = htons(port); }
+        else { ((struct sockaddr_in*)&addr)->sin_port = htons(port); }
+    }
+
+    bool Address::isIPv6() const {
+        return addr.ss_family == AF_INET6;
+    }
+
+    int Address::family() const {
+        return isIPv6() ? AF_INET6 : AF_INET;
+    }
+
+    int Address::size() const {
+        return isIPv6() ? (int)sizeof(struct sockaddr_in6) : (int)sizeof(struct sockaddr_in);
+    }
+
+    bool Address::isUnspecified() const {
+        if (isIPv6()) {
+            const struct sockaddr_in6* a6 = (const struct sockaddr_in6*)&addr;
+            return IN6_IS_ADDR_UNSPECIFIED(&a6->sin6_addr);
+        }
+        return ((const struct sockaddr_in*)&addr)->sin_addr.s_addr == 0;
     }
 
     // === Socket functions ===
@@ -138,8 +178,13 @@ namespace net {
     }
 
     int Socket::send(const uint8_t* data, size_t len, const Address* dest) {
-        // Send data
-        int err = sendto(sock, (const char*)data, len, 0, (sockaddr*)(dest ? &dest->addr : (raddr ? &raddr->addr : NULL)), sizeof(sockaddr_in));
+        int err;
+        if (!dest && !raddr) {
+            err = ::send(sock, (const char*)data, len, 0);
+        } else {
+            const Address* target = dest ? dest : raddr;
+            err = sendto(sock, (const char*)data, len, 0, (sockaddr*)&target->addr, target->size());
+        }
 
         // On error, close socket
         if (err <= 0 && !WOULD_BLOCK) {
@@ -177,9 +222,16 @@ namespace net {
                 if (err <= 0) { return err; }
             }
 
-            // Receive
-            int addrLen = sizeof(sockaddr_in);
-            int err = ::recvfrom(sock, (char*)&data[read], maxLen - read, 0,(sockaddr*)(dest ? &dest->addr : NULL), (socklen_t*)(dest ? &addrLen : NULL));
+            int err;
+            // 【修复】如果是 TCP 接收，直接使用 recv()
+            if (!dest) {
+                err = ::recv(sock, (char*)&data[read], maxLen - read, 0);
+            } else {
+                // 如果是 UDP，使用 recvfrom 和通用的 sockaddr_storage
+                int addrLen = sizeof(struct sockaddr_storage);
+                err = ::recvfrom(sock, (char*)&data[read], maxLen - read, 0, (sockaddr*)&dest->addr, (socklen_t*)&addrLen);
+            }
+
             if (err <= 0 && !WOULD_BLOCK) {
                 close();
                 return err;
@@ -244,7 +296,7 @@ namespace net {
         }
 
         // Accept
-        int addrLen = sizeof(sockaddr_in);
+        int addrLen = sizeof(struct sockaddr_storage);
         SockHandle_t s = ::accept(sock, (sockaddr*)(dest ? &dest->addr : NULL), (socklen_t*)(dest ? &addrLen : NULL));
         if ((int)s < 0) {
             if (!WOULD_BLOCK) { stop(); }
@@ -318,9 +370,17 @@ namespace net {
         // Init library if needed
         init();
 
-        // Create socket
-        SockHandle_t s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        // Create socket (IPv4 or IPv6 depending on the address)
+        SockHandle_t s = socket(addr.family(), SOCK_STREAM, IPPROTO_TCP);
         // TODO: Support non-blockign mode
+
+#ifdef _WIN32
+        if (s == INVALID_SOCKET) {
+#else
+        if (s < 0) {
+#endif
+            throw std::runtime_error("Could not create socket (IP version not supported on this system)");
+        }
 
 #ifndef _WIN32
         // Allow port reusing if the app was killed or crashed
@@ -335,8 +395,18 @@ namespace net {
         }
 #endif
 
+        // IPv6 监听套接字同时接受 IPv4 连接（双栈）。Windows 默认仅 IPv6，需要显式关闭 V6ONLY
+        if (addr.isIPv6()) {
+#ifdef _WIN32
+            DWORD v6only = 0;
+#else
+            int v6only = 0;
+#endif
+            setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, (const char*)&v6only, sizeof(v6only));
+        }
+
         // Bind socket to the port
-        if (bind(s, (sockaddr*)&addr.addr, sizeof(sockaddr_in))) {
+        if (bind(s, (sockaddr*)&addr.addr, addr.size())) {
             closeSocket(s);
             throw std::runtime_error("Could not bind socket");
             return NULL;
@@ -363,13 +433,22 @@ namespace net {
         // Init library if needed
         init();
 
-        // Create socket
-        SockHandle_t s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        // Create socket (IPv4 or IPv6 depending on the address)
+        SockHandle_t s = socket(addr.family(), SOCK_STREAM, IPPROTO_TCP);
 
-        // Connect to server
-        if (::connect(s, (sockaddr*)&addr.addr, sizeof(sockaddr_in))) {
+        // Connect to server (with timeout)
+
+#ifdef _WIN32
+        if (s == INVALID_SOCKET) {
+#else
+        if (s < 0) {
+#endif
+            throw std::runtime_error("Could not create socket (IP version not supported on this system)");
+        }
+        int err = 0;
+        if (!detail::connectWithTimeout(s, (sockaddr*)&addr.addr, addr.size(), 8000, err)) {
             closeSocket(s);
-            throw std::runtime_error("Could not connect");
+            throw std::runtime_error("Could not connect: " + detail::describeConnectError(err));
             return NULL;
         }
 
@@ -381,35 +460,118 @@ namespace net {
     }
 
     std::shared_ptr<Socket> connect(std::string host, int port) {
-        return connect(Address(host, port));
-    }
-
-    std::shared_ptr<Socket> openudp(const Address& raddr, const Address& laddr, bool allowBroadcast) {
         // Init library if needed
         init();
 
-        // Create socket
-        SockHandle_t s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        // 支持 IPv4 地址、IPv6 地址（可带方括号）和域名
+        std::string target = detail::normalizeHost(host);
+        if (target.empty()) {
+            throw std::runtime_error("Host is empty");
+        }
 
-        // If the remote address is multicast, allow multicast connections
-        #ifdef _WIN32
-                const char enable = allowBroadcast;
-        #else
-                int enable = allowBroadcast;
-        #endif
-        if (setsockopt(s, SOL_SOCKET, SO_BROADCAST, &enable, sizeof(int)) < 0) {
+        struct addrinfo* results = detail::resolveHost(target, port, SOCK_STREAM);
+        if (!results) {
+            throw std::runtime_error("Unknown host");
+        }
+
+        // 依次尝试解析出的每个地址（域名可能同时有 IPv6 和 IPv4），每个地址最多等待 8 秒
+        int lastErr = 0;
+        for (struct addrinfo* ai = results; ai; ai = ai->ai_next) {
+            SockHandle_t s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+#ifdef _WIN32
+            if (s == INVALID_SOCKET) { lastErr = detail::lastSockError(); continue; }
+#else
+            if (s < 0) { lastErr = detail::lastSockError(); continue; }
+#endif
+            int err = 0;
+            if (detail::connectWithTimeout(s, ai->ai_addr, (int)ai->ai_addrlen, 8000, err)) {
+                freeaddrinfo(results);
+
+                // Enable nonblocking mode
+                setNonblocking(s);
+
+                return std::make_shared<Socket>(s);
+            }
+            lastErr = err;
             closeSocket(s);
-            throw std::runtime_error("Could not enable broadcast on socket");
-            return NULL;
+        }
+
+        freeaddrinfo(results);
+        throw std::runtime_error("Could not connect: " + detail::describeConnectError(lastErr));
+    }
+
+    std::shared_ptr<Socket> openudp(const Address& raddr_in, const Address& laddr_in, bool allowBroadcast) {
+        // Init library if needed
+        init();
+
+        // 确定使用的协议族：远端地址是具体地址时跟随远端；远端为通配地址（0.0.0.0 或 ::）时跟随本地地址
+        Address raddr = raddr_in;
+        Address laddr = laddr_in;
+        int family = (!raddr.isUnspecified()) ? raddr.family() : laddr.family();
+
+        // 本地或远端的通配地址与所选协议族不一致时，转换成该协议族的通配地址并保留端口
+        auto toFamily = [family](Address& a) {
+            if (a.family() == family) { return; }
+            if (!a.isUnspecified()) { throw std::runtime_error("Local and remote addresses use different IP versions"); }
+            int port = a.getPort();
+            memset(&a.addr, 0, sizeof(a.addr));
+            if (family == AF_INET6) {
+                struct sockaddr_in6* a6 = (struct sockaddr_in6*)&a.addr;
+                a6->sin6_family = AF_INET6;
+                a6->sin6_addr = in6addr_any;
+                a6->sin6_port = htons(port);
+            }
+            else {
+                struct sockaddr_in* a4 = (struct sockaddr_in*)&a.addr;
+                a4->sin_family = AF_INET;
+                a4->sin_addr.s_addr = htonl(INADDR_ANY);
+                a4->sin_port = htons(port);
+            }
+        };
+        toFamily(raddr);
+        toFamily(laddr);
+
+        // Create socket
+        SockHandle_t s = socket(family, SOCK_DGRAM, IPPROTO_UDP);
+
+#ifdef _WIN32
+        if (s == INVALID_SOCKET) {
+#else
+        if (s < 0) {
+#endif
+            throw std::runtime_error("Could not create socket (IP version not supported on this system)");
+        }
+
+        // 广播只存在于 IPv4；IPv6 使用组播，不设置 SO_BROADCAST
+        if (family == AF_INET) {
+#ifdef _WIN32
+            const char enable = allowBroadcast;
+#else
+            int enable = allowBroadcast;
+#endif
+            if (setsockopt(s, SOL_SOCKET, SO_BROADCAST, &enable, sizeof(int)) < 0) {
+                closeSocket(s);
+                throw std::runtime_error("Could not enable broadcast on socket");
+                return NULL;
+            }
+        }
+        else {
+            // 双栈：同时接收 IPv4 映射地址的数据报
+#ifdef _WIN32
+            DWORD v6only = 0;
+#else
+            int v6only = 0;
+#endif
+            setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, (const char*)&v6only, sizeof(v6only));
         }
 
         // Bind socket to local port
-        if (bind(s, (sockaddr*)&laddr.addr, sizeof(sockaddr_in))) {
+        if (bind(s, (sockaddr*)&laddr.addr, laddr.size())) {
             closeSocket(s);
             throw std::runtime_error("Could not bind socket");
             return NULL;
         }
-        
+
         // Return socket class
         return std::make_shared<Socket>(s, &raddr);
     }

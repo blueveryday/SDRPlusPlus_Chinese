@@ -10,7 +10,6 @@
 #include <gui/widgets/stepped_slider.h>
 #include <gui/smgui.h>
 
-
 #define CONCAT(a, b) ((std::string(a) + b).c_str())
 
 SDRPP_MOD_INFO{
@@ -65,7 +64,7 @@ public:
         handler.tuneHandler = tune;
         handler.stream = &stream;
 
-        strcpy(hostname, host.c_str());
+        snprintf(hostname, sizeof(hostname), "%s", host.c_str());
 
         sigpath::sourceManager.registerSource("SpyServer", &handler);
     }
@@ -238,15 +237,25 @@ private:
             SmGui::SameLine();
             SmGui::Text("Not connected");
         }
+
+        // 连接错误提示：直接显示在菜单里（弹窗在手机上容易被软键盘遮挡，远程界面模式下也看不到）
+        if (!_this->errorMsg.empty()) {
+            ImGui::PushTextWrapPos(0.0f);
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", _this->errorMsg.c_str());
+            ImGui::PopTextWrapPos();
+        }
     }
 
     void tryConnect() {
         try {
             if (client) { client.reset(); }
+            errorMsg = "";
+
             client = spyserver::connect(hostname, port, &stream);
 
             if (!client->waitForDevInfo(3000)) {
                 flog::error("SpyServer didn't respond with device information");
+                errorMsg = "服务器未返回设备信息（超时），请确认地址、端口以及服务器是否正常运行";
             }
             else {
                 char buf[1024];
@@ -285,6 +294,7 @@ private:
         }
         catch (const std::exception& e) {
             flog::error("Could not connect to spyserver {}", e.what());
+            errorMsg = std::string("连接失败: ") + e.what();
         }
     }
 
@@ -305,6 +315,7 @@ private:
     uint32_t gain = 0;
 
     std::string devRef = "";
+    std::string errorMsg = ""; // 显示在菜单中的连接错误信息
 
     dsp::stream<dsp::complex_t> stream;
     SourceManager::SourceHandler handler;

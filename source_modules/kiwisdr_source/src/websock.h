@@ -287,8 +287,10 @@ namespace net::websock {
                 "Upgrade: websocket\r\n"
                 "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36\r\n";
             initHeaders = "GET " + path + " HTTP/1.1\r\n" + initHeaders;
-            initHeaders += "Host: " + host + ":" + std::to_string(port) + "\r\n";
-            initHeaders += "Origin: http://" + host + ":" + std::to_string(port) + "\r\n";
+            // IPv6 字面量在 HTTP 头中必须带方括号，例如 "Host: [2001:db8::1]:8073"
+            const std::string hostForHeader = (host.find(':') != std::string::npos && host.front() != '[') ? ("[" + host + "]") : host;
+            initHeaders += "Host: " + hostForHeader + ":" + std::to_string(port) + "\r\n";
+            initHeaders += "Origin: http://" + hostForHeader + ":" + std::to_string(port) + "\r\n";
             initHeaders += "\r\n";
 
             int len = socket->sendstr(initHeaders);
