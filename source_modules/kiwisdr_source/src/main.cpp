@@ -9,6 +9,7 @@
 #define IMGUI_DEFINE_MATH_OPERATORS
 #include <imgui.h>
 #include <utils/flog.h>
+#include <utils/i18n.h>
 #include <module.h>
 #include <gui/gui.h>
 #include <gui/smgui.h>
@@ -239,14 +240,14 @@ private:
         if (_this->running) { SmGui::EndDisabled(); }
 
         SmGui::Text("格式: 主机:端口 或 http://主机:端口/");
-        SmGui::Text(("位置: " + _this->kiwisdrLoc).c_str());
-        SmGui::Text(("状态: " + std::string(_this->kiwiSdrClient.connectionStatus)).c_str());
+        SmGui::Text((std::string(i18n::tr("位置: ")) + _this->kiwisdrLoc).c_str());
+        SmGui::Text((std::string(i18n::tr("状态: ")) + std::string(_this->kiwiSdrClient.connectionStatus)).c_str());
 
         std::time_t t = (std::time_t)(sigpath::iqFrontEnd.getCurrentStreamTime() / 1000);
         std::tm* tmm = std::localtime(&t);
         char streamTime[64] = "-";
         if (tmm) { strftime(streamTime, sizeof(streamTime), "%Y-%m-%d %H:%M:%S", tmm); }
-        SmGui::Text(("流时间: " + std::string(streamTime)).c_str());
+        SmGui::Text((std::string(i18n::tr("流时间: ")) + std::string(streamTime)).c_str());
     }
 
     std::string name;

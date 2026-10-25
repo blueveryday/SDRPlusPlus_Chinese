@@ -814,6 +814,7 @@ CODE
 #define IMGUI_DEFINE_MATH_OPERATORS
 #endif
 #include "imgui_internal.h"
+#include <utils/i18n.h>   // [SDR++] 界面多语言
 
 // System includes
 #include <ctype.h>      // toupper
@@ -2965,12 +2966,48 @@ const char* ImGui::FindRenderedTextEnd(const char* text, const char* text_end)
     return text_display_end;
 }
 
+// [SDR++] 界面文字翻译：text 是要显示的原文（遇到 "##" 之后的 ID 部分不参与翻译）。
+// 有译文时把 text/text_end 改为指向译文并返回 true；没有译文时不改动任何参数。
+// 语言为原文（中文）时 i18n::isActive() 为 false，几乎没有开销。
+bool ImGui::I18nMapText(const char*& text, const char*& text_end, bool hide_text_after_hash)
+{
+    if (text == NULL || !i18n::isActive())
+        return false;
+    const char* seg_end;
+    if (hide_text_after_hash)
+        seg_end = FindRenderedTextEnd(text, text_end);
+    else
+        seg_end = text_end ? text_end : text + strlen(text);
+    const size_t len = (size_t)(seg_end - text);
+    if (len == 0)
+        return false;
+    size_t out_len = 0;
+    const char* translated = i18n::lookup(text, len, &out_len);
+    if (translated == NULL)
+        return false;
+    text = translated;
+    text_end = translated + out_len;
+    return true;
+}
+
+// [SDR++] printf 风格的格式串翻译（Text、LabelText、BulletText 等）
+const char* ImGui::I18nMapFormat(const char* fmt)
+{
+    if (fmt == NULL || !i18n::isActive())
+        return fmt;
+    size_t out_len = 0;
+    const char* translated = i18n::lookup(fmt, strlen(fmt), &out_len);
+    return translated ? translated : fmt;
+}
+
 // Internal ImGui functions to render text
 // RenderText***() functions calls ImDrawList::AddText() calls ImBitmapFont::RenderText()
 void ImGui::RenderText(ImVec2 pos, const char* text, const char* text_end, bool hide_text_after_hash)
 {
     ImGuiContext& g = *GImGui;
     ImGuiWindow* window = g.CurrentWindow;
+
+    I18nMapText(text, text_end, hide_text_after_hash); // [SDR++]
 
     // Hide anything after a '##' string
     const char* text_display_end;
@@ -2997,6 +3034,8 @@ void ImGui::RenderTextWrapped(ImVec2 pos, const char* text, const char* text_end
 {
     ImGuiContext& g = *GImGui;
     ImGuiWindow* window = g.CurrentWindow;
+
+    I18nMapText(text, text_end, false); // [SDR++]
 
     if (!text_end)
         text_end = text + strlen(text); // FIXME-OPT
@@ -3041,6 +3080,7 @@ void ImGui::RenderTextClippedEx(ImDrawList* draw_list, const ImVec2& pos_min, co
 
 void ImGui::RenderTextClipped(const ImVec2& pos_min, const ImVec2& pos_max, const char* text, const char* text_end, const ImVec2* text_size_if_known, const ImVec2& align, const ImRect* clip_rect)
 {
+    I18nMapText(text, text_end, true); // [SDR++]
     // Hide anything after a '##' string
     const char* text_display_end = FindRenderedTextEnd(text, text_end);
     const int text_len = (int)(text_display_end - text);
@@ -3063,6 +3103,7 @@ void ImGui::RenderTextEllipsis(ImDrawList* draw_list, const ImVec2& pos_min, con
     ImGuiContext& g = *GImGui;
     if (text_end_full == NULL)
         text_end_full = FindRenderedTextEnd(text);
+    I18nMapText(text, text_end_full, false); // [SDR++]
     const ImVec2 text_size = text_size_if_known ? *text_size_if_known : CalcTextSize(text, text_end_full, false, 0.0f);
 
     //draw_list->AddLine(ImVec2(pos_max.x, pos_min.y - 4), ImVec2(pos_max.x, pos_max.y + 4), IM_COL32(0, 0, 255, 255));
@@ -4917,6 +4958,8 @@ void ImGui::Render()
 ImVec2 ImGui::CalcTextSize(const char* text, const char* text_end, bool hide_text_after_double_hash, float wrap_width)
 {
     ImGuiContext& g = *GImGui;
+
+    I18nMapText(text, text_end, hide_text_after_double_hash); // [SDR++]
 
     const char* text_display_end;
     if (hide_text_after_double_hash)

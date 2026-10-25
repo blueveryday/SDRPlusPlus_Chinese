@@ -1,4 +1,4 @@
-name: Build SDR++ CE 中文版
+name: Build SDR++ CE Multilingual Version
 
 on:
     push:
@@ -23,6 +23,9 @@ jobs:
 
         steps:
         - uses: actions/checkout@v5
+        - name: Sync version from version.txt
+          shell: bash
+          run: python tools/sync_version.py
 
         - name: Create Build Environment
           run: cmake -E make_directory ${{runner.workspace}}/build
@@ -139,6 +142,9 @@ jobs:
 
         steps:
         - uses: actions/checkout@v5
+        - name: Sync version from version.txt
+          shell: bash
+          run: python3 tools/sync_version.py
 
         - name: Create Build Environment
           run: cmake -E make_directory ${{runner.workspace}}/build
@@ -216,6 +222,9 @@ jobs:
         runs-on: ubuntu-24.04
         steps:
         - uses: actions/checkout@v5
+        - name: Sync version from version.txt
+          shell: bash
+          run: python3 tools/sync_version.py
         - name: Create Docker Image
           run: cd $GITHUB_WORKSPACE/docker_builds/debian_bullseye && docker build . --tag sdrpp_build
         - name: Run Container
@@ -233,6 +242,9 @@ jobs:
         runs-on: ubuntu-24.04-arm
         steps:
         - uses: actions/checkout@v5
+        - name: Sync version from version.txt
+          shell: bash
+          run: python3 tools/sync_version.py
         - name: Create Docker Image
           run: cd $GITHUB_WORKSPACE/docker_builds/debian_bullseye && docker build . --tag sdrpp_build
         - name: Run Container
@@ -250,6 +262,9 @@ jobs:
         runs-on: ubuntu-24.04
         steps:
         - uses: actions/checkout@v5
+        - name: Sync version from version.txt
+          shell: bash
+          run: python3 tools/sync_version.py
         - name: Create Docker Image
           run: cd $GITHUB_WORKSPACE/docker_builds/debian_bookworm && docker build . --tag sdrpp_build
         - name: Run Container
@@ -267,6 +282,9 @@ jobs:
         runs-on: ubuntu-24.04-arm
         steps:
         - uses: actions/checkout@v5
+        - name: Sync version from version.txt
+          shell: bash
+          run: python3 tools/sync_version.py
         - name: Create Docker Image
           run: cd $GITHUB_WORKSPACE/docker_builds/debian_bookworm && docker build . --tag sdrpp_build
         - name: Run Container
@@ -284,6 +302,9 @@ jobs:
         runs-on: ubuntu-24.04
         steps:
         - uses: actions/checkout@v5
+        - name: Sync version from version.txt
+          shell: bash
+          run: python3 tools/sync_version.py
         - name: Create Docker Image
           run: cd $GITHUB_WORKSPACE/docker_builds/debian_trixie && docker build . --tag sdrpp_build
         - name: Run Container
@@ -301,6 +322,9 @@ jobs:
         runs-on: ubuntu-24.04-arm
         steps:
         - uses: actions/checkout@v5
+        - name: Sync version from version.txt
+          shell: bash
+          run: python3 tools/sync_version.py
         - name: Create Docker Image
           run: cd $GITHUB_WORKSPACE/docker_builds/debian_trixie && docker build . --tag sdrpp_build
         - name: Run Container
@@ -318,6 +342,9 @@ jobs:
         runs-on: ubuntu-24.04
         steps:
         - uses: actions/checkout@v5
+        - name: Sync version from version.txt
+          shell: bash
+          run: python3 tools/sync_version.py
         - name: Create Docker Image
           run: cd $GITHUB_WORKSPACE/docker_builds/debian_sid && docker build . --tag sdrpp_build
         - name: Run Container
@@ -335,6 +362,9 @@ jobs:
         runs-on: ubuntu-24.04-arm
         steps:
         - uses: actions/checkout@v5
+        - name: Sync version from version.txt
+          shell: bash
+          run: python3 tools/sync_version.py
         - name: Create Docker Image
           run: cd $GITHUB_WORKSPACE/docker_builds/debian_sid && docker build . --tag sdrpp_build
         - name: Run Container
@@ -352,6 +382,9 @@ jobs:
         runs-on: ubuntu-24.04
         steps:
         - uses: actions/checkout@v5
+        - name: Sync version from version.txt
+          shell: bash
+          run: python3 tools/sync_version.py
         - name: Create Docker Image
           run: cd $GITHUB_WORKSPACE/docker_builds/ubuntu_focal && docker build . --tag sdrpp_build
         - name: Run Container
@@ -369,6 +402,9 @@ jobs:
         runs-on: ubuntu-24.04-arm
         steps:
         - uses: actions/checkout@v5
+        - name: Sync version from version.txt
+          shell: bash
+          run: python3 tools/sync_version.py
         - name: Create Docker Image
           run: cd $GITHUB_WORKSPACE/docker_builds/ubuntu_focal && docker build . --tag sdrpp_build
         - name: Run Container
@@ -386,6 +422,9 @@ jobs:
         runs-on: ubuntu-24.04
         steps:
         - uses: actions/checkout@v5
+        - name: Sync version from version.txt
+          shell: bash
+          run: python3 tools/sync_version.py
         - name: Create Docker Image
           run: cd $GITHUB_WORKSPACE/docker_builds/ubuntu_jammy && docker build . --tag sdrpp_build
         - name: Run Container
@@ -403,6 +442,9 @@ jobs:
         runs-on: ubuntu-24.04-arm
         steps:
         - uses: actions/checkout@v5
+        - name: Sync version from version.txt
+          shell: bash
+          run: python3 tools/sync_version.py
         - name: Create Docker Image
           run: cd $GITHUB_WORKSPACE/docker_builds/ubuntu_jammy && docker build . --tag sdrpp_build
         - name: Run Container
@@ -420,6 +462,9 @@ jobs:
         runs-on: ubuntu-24.04
         steps:
         - uses: actions/checkout@v5
+        - name: Sync version from version.txt
+          shell: bash
+          run: python3 tools/sync_version.py
         - name: Create Docker Image
           run: cd $GITHUB_WORKSPACE/docker_builds/ubuntu_noble && docker build . --tag sdrpp_build
         - name: Run Container
@@ -437,6 +482,9 @@ jobs:
         runs-on: ubuntu-24.04-arm
         steps:
         - uses: actions/checkout@v5
+        - name: Sync version from version.txt
+          shell: bash
+          run: python3 tools/sync_version.py
         - name: Create Docker Image
           run: cd $GITHUB_WORKSPACE/docker_builds/ubuntu_noble && docker build . --tag sdrpp_build
         - name: Run Container
@@ -454,6 +502,9 @@ jobs:
         runs-on: ubuntu-24.04
         steps:
         - uses: actions/checkout@v5
+        - name: Sync version from version.txt
+          shell: bash
+          run: python3 tools/sync_version.py
         - name: Create Docker Image
           run: cd $GITHUB_WORKSPACE/docker_builds/ubuntu_resolute && docker build . --tag sdrpp_build
         - name: Run Container
@@ -471,6 +522,9 @@ jobs:
         runs-on: ubuntu-24.04-arm
         steps:
         - uses: actions/checkout@v5
+        - name: Sync version from version.txt
+          shell: bash
+          run: python3 tools/sync_version.py
         - name: Create Docker Image
           run: cd $GITHUB_WORKSPACE/docker_builds/ubuntu_resolute && docker build . --tag sdrpp_build
         - name: Run Container
@@ -489,6 +543,9 @@ jobs:
 
         steps:
         - uses: actions/checkout@v5
+        - name: Sync version from version.txt
+          shell: bash
+          run: python3 tools/sync_version.py
 
         - name: Fetch container source
           working-directory: ${{runner.workspace}}
@@ -566,6 +623,8 @@ jobs:
             has_files: ${{ steps.collect.outputs.has_files }}
 
         steps:
+        - uses: actions/checkout@v5
+
         - name: Download All Builds
           uses: actions/download-artifact@v7
 
@@ -576,8 +635,13 @@ jobs:
           id: collect
           run: |
             mkdir -p sdrpp_all
+            # 发布文件名统一加上 version.txt 里的版本号（已带 _CE 后缀），例如 sdrpp_windows_x64_v1.3.0_CE.zip
+            VERSION=$(tr -d '[:space:]' < version.txt)
+            echo "Version suffix: _$VERSION"
             copy() {
-              src="$1"; dst="$2"
+              src="$1"; name="$2"
+              base="${name%.*}"; ext="${name##*.}"
+              dst="${base}_${VERSION}.${ext}"
               if [ -f "$src" ]; then
                 cp -f "$src" "sdrpp_all/$dst"
                 echo "OK   $src -> $dst"
@@ -603,7 +667,7 @@ jobs:
             copy sdrpp_ubuntu_noble_aarch64/sdrpp_debian_amd64.deb  sdrpp_ubuntu_noble_aarch64.deb
             copy sdrpp_ubuntu_resolute_amd64/sdrpp_debian_amd64.deb sdrpp_ubuntu_resolute_amd64.deb
             copy sdrpp_ubuntu_resolute_aarch64/sdrpp_debian_amd64.deb sdrpp_ubuntu_resolute_aarch64.deb
-            copy sdrpp_android/sdrpp.apk                            sdrpp.apk
+            copy sdrpp_android/sdrpp.apk                            sdrpp_android.apk
 
             count=$(ls -1 sdrpp_all/ | wc -l)
             echo "Collected $count files"
@@ -660,31 +724,43 @@ jobs:
             GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           run: |
             TAG_NAME="${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || steps.ver.outputs.version }}"
+            VERSION="${{ steps.ver.outputs.version }}"
             
             if ! gh release view "$TAG_NAME" > /dev/null 2>&1; then
               echo "Release $TAG_NAME does not exist. Creating it..."
-              gh release create "$TAG_NAME" --title "SDR++ CE 中文版 $TAG_NAME" --notes "## SDR++ CE中文版 $TAG_NAME
+              gh release create "$TAG_NAME" --title "SDR++ CE Multilingual Version $TAG_NAME" --notes "## SDR++ CE Multilingual Version $TAG_NAME
             
-            ### 更新内容
-            - 集成kimiSDR信号源
-            - 汉化SDR++ CE
-            - 完整提交查看仓库 commit 历史
+            ## 特性
+
+            * 集成kiwisdr信号源
+            * Feat. SDR++ CE模块特征
+            * 支持Ipv6地址或域名连接
+            * 优化Android操作，修复Android若干bug
+            * 支持多语言界面选择, 用户可自定义语言文件
+
+            ## Features
+
+            * Integrated KiwiSDR signal source
+            * Includes SDR++ CE module features
+            * Supports connections via IPv6 addresses or domain names
+            * Optimized for Android, fixed several Android-related bugs
+            * Supports multiple interface languages, with options for users to create custom language files
             
             ### 下载说明
             
             | 平台 | 文件 |
             |---|---|
-            | Windows x64 | \`sdrpp_windows_x64.zip\` |
-            | macOS ARM (Apple Silicon) | \`sdrpp_macos_arm.zip\` |
-            | Debian bullseye | \`sdrpp_debian_bullseye_amd64.deb\` / \`sdrpp_debian_bullseye_aarch64.deb\` |
-            | Debian bookworm | \`sdrpp_debian_bookworm_amd64.deb\` / \`sdrpp_debian_bookworm_aarch64.deb\` |
-            | Debian trixie | \`sdrpp_debian_trixie_amd64.deb\` / \`sdrpp_debian_trixie_aarch64.deb\` |
-            | Debian sid | \`sdrpp_debian_sid_amd64.deb\` / \`sdrpp_debian_sid_aarch64.deb\` |
-            | Ubuntu focal (20.04) | \`sdrpp_ubuntu_focal_amd64.deb\` / \`sdrpp_ubuntu_focal_aarch64.deb\` |
-            | Ubuntu jammy (22.04) | \`sdrpp_ubuntu_jammy_amd64.deb\` / \`sdrpp_ubuntu_jammy_aarch64.deb\` |
-            | Ubuntu noble (24.04) | \`sdrpp_ubuntu_noble_amd64.deb\` / \`sdrpp_ubuntu_noble_aarch64.deb\` |
-            | Ubuntu resolute | \`sdrpp_ubuntu_resolute_amd64.deb\` / \`sdrpp_ubuntu_resolute_aarch64.deb\` |
-            | Android | \`sdrpp.apk\` |
+            | Windows x64 | \`sdrpp_windows_x64_${VERSION}.zip\` |
+            | macOS ARM (Apple Silicon) | \`sdrpp_macos_arm_${VERSION}.zip\` |
+            | Debian bullseye | \`sdrpp_debian_bullseye_amd64_${VERSION}.deb\` / \`sdrpp_debian_bullseye_aarch64_${VERSION}.deb\` |
+            | Debian bookworm | \`sdrpp_debian_bookworm_amd64_${VERSION}.deb\` / \`sdrpp_debian_bookworm_aarch64_${VERSION}.deb\` |
+            | Debian trixie | \`sdrpp_debian_trixie_amd64_${VERSION}.deb\` / \`sdrpp_debian_trixie_aarch64_${VERSION}.deb\` |
+            | Debian sid | \`sdrpp_debian_sid_amd64_${VERSION}.deb\` / \`sdrpp_debian_sid_aarch64_${VERSION}.deb\` |
+            | Ubuntu focal (20.04) | \`sdrpp_ubuntu_focal_amd64_${VERSION}.deb\` / \`sdrpp_ubuntu_focal_aarch64_${VERSION}.deb\` |
+            | Ubuntu jammy (22.04) | \`sdrpp_ubuntu_jammy_amd64_${VERSION}.deb\` / \`sdrpp_ubuntu_jammy_aarch64_${VERSION}.deb\` |
+            | Ubuntu noble (24.04) | \`sdrpp_ubuntu_noble_amd64_${VERSION}.deb\` / \`sdrpp_ubuntu_noble_aarch64_${VERSION}.deb\` |
+            | Ubuntu resolute | \`sdrpp_ubuntu_resolute_amd64_${VERSION}.deb\` / \`sdrpp_ubuntu_resolute_aarch64_${VERSION}.deb\` |
+            | Android | \`sdrpp_android_${VERSION}.apk\` |
             
             ### 安装说明
             - Windows: 解压后运行 \`sdrpp.exe\`

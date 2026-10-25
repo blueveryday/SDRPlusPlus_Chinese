@@ -1,4 +1,5 @@
 #include <gui/menus/module_manager.h>
+#include <utils/i18n.h>
 #include <imgui.h>
 #include <core.h>
 #include <string.h>
@@ -103,7 +104,7 @@ namespace module_manager_menu {
                     modified = true;
                 }
                 else {
-                    errorMessage = "无法创建 " + modTypes[modTypeId] + " 的新实例";
+                    errorMessage = std::string(i18n::tr("无法创建 ")) + modTypes[modTypeId] + i18n::tr(" 的新实例");
                     errorOpen = true;
                 }
             }

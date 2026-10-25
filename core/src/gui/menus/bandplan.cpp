@@ -1,4 +1,5 @@
 #include <gui/menus/bandplan.h>
+#include <utils/i18n.h>
 #include <gui/widgets/bandplan.h>
 #include <gui/gui.h>
 #include <core.h>
@@ -61,7 +62,7 @@ namespace bandplanmenu {
             core::configManager.release(true);
         }
         bandplan::BandPlan_t plan = bandplan::bandplans[bandplan::bandplanNames[bandplanId]];
-        ImGui::Text("国家: %s (%s)", plan.countryName.c_str(), plan.countryCode.c_str());
+        ImGui::Text("国家: %s (%s)", i18n::tr(plan.countryName.c_str()), plan.countryCode.c_str());
         ImGui::Text("作者: %s", plan.authorName.c_str());
     }
 };

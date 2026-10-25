@@ -104,6 +104,8 @@ cp $build_dir/misc_modules/rigctl_server/Release/rigctl_server.dll sdrpp_windows
 
 cp $build_dir/misc_modules/scanner/Release/scanner.dll sdrpp_windows_x64/modules/
 
+cp $build_dir/misc_modules/change_language/Release/change_language.dll sdrpp_windows_x64/modules/
+
 
 # Copy supporting libs
 cp 'C:/Program Files/PothosSDR/bin/libusb-1.0.dll' sdrpp_windows_x64/

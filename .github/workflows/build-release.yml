@@ -1,4 +1,4 @@
-name: Build SDR++ 中文版
+name: Build SDR++ Multilingual Version
 
 on:
     push:
