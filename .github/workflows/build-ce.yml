@@ -728,9 +728,7 @@ jobs:
             
             if ! gh release view "$TAG_NAME" > /dev/null 2>&1; then
               echo "Release $TAG_NAME does not exist. Creating it..."
-              gh release create "$TAG_NAME" --title "SDR++ CE Multilingual Version $TAG_NAME" --notes "## SDR++ CE Multilingual Version $TAG_NAME
-            
-            ## 特性
+              gh release create "$TAG_NAME" --title "SDR++ CE Multilingual Version $VERSION" --notes "## 特性
 
             * 集成kiwisdr信号源
             * Feat. SDR++ CE模块特征

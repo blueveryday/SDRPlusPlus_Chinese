@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
-"""把仓库根目录 version.txt 里的版本号同步到各平台写死版本号的地方。
 
-version.txt 是唯一的版本号来源，例如：  v1.3.0_CE
-  - 完整版本  v1.3.0_CE   用于发布文件名
-  - 数字版本  1.3.0       用于程序界面、macOS Info.plist、Debian 包
-Android 的 versionName / versionCode 已由 android/app/build.gradle 直接读取 version.txt，这里不需要处理。
-
-GitHub Actions 在每个构建任务的开头运行本脚本，这样改了 version.txt 就够了，编译出来的程序不会再显示旧版本号。
-也可以在本地手动运行：  python3 tools/sync_version.py
-"""
 import os
 import re
 import sys
+
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding='utf-8', errors='replace')
+    except (AttributeError, ValueError):
+        pass
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
