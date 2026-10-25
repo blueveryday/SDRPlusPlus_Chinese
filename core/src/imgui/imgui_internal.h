@@ -2752,6 +2752,10 @@ namespace ImGui
     // NB: All position are in absolute pixels coordinates (we are never using window coordinates internally)
     IMGUI_API void          RenderText(ImVec2 pos, const char* text, const char* text_end = NULL, bool hide_text_after_hash = true);
     IMGUI_API void          RenderTextWrapped(ImVec2 pos, const char* text, const char* text_end, float wrap_width);
+    // [SDR++] 界面文字翻译钩子：按原文查找译文（对照表见 utils/i18n.h，实现见 imgui.cpp）
+    IMGUI_API bool          I18nMapText(const char*& text, const char*& text_end, bool hide_text_after_hash);
+    IMGUI_API const char*   I18nMapFormat(const char* fmt);
+    IMGUI_API void          TextInputAction(int action);   // 对获得焦点的输入框执行：1 全选，2 复制，3 剪切，4 粘贴，5 删除（触摸屏工具栏用）
     IMGUI_API void          RenderTextClipped(const ImVec2& pos_min, const ImVec2& pos_max, const char* text, const char* text_end, const ImVec2* text_size_if_known, const ImVec2& align = ImVec2(0, 0), const ImRect* clip_rect = NULL);
     IMGUI_API void          RenderTextClippedEx(ImDrawList* draw_list, const ImVec2& pos_min, const ImVec2& pos_max, const char* text, const char* text_end, const ImVec2* text_size_if_known, const ImVec2& align = ImVec2(0, 0), const ImRect* clip_rect = NULL);
     IMGUI_API void          RenderTextEllipsis(ImDrawList* draw_list, const ImVec2& pos_min, const ImVec2& pos_max, float clip_max_x, float ellipsis_max_x, const char* text, const char* text_end, const ImVec2* text_size_if_known);

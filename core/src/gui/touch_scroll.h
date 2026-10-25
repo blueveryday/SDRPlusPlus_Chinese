@@ -26,6 +26,12 @@ namespace touchscroll {
 
         // 尚未应用的滚动量（像素，正值表示内容向上滚动，即显示更靠下的内容）
         float pendingScroll = 0;
+
+        // 面板内各模块自己的滚动条（例如模块管理器、频率管理器里的列表）所在的矩形。
+        // 手指按在这些区域时不做手势判断，直接交给 ImGui，这样滚动条才能被拖动。主窗口每帧更新。
+        static const int kMaxExclusions = 16;
+        int exclusionCount = 0;
+        float exclusions[kMaxExclusions][4] = {};
     };
 
     inline State& state() {
@@ -42,6 +48,30 @@ namespace touchscroll {
         s.x1 = x1;
         s.y1 = y1;
         s.slop = slop;
+    }
+
+    // 主窗口每帧调用：清空 / 添加“不参与手势”的矩形（子窗口滚动条）
+    inline void clearExclusions() {
+        state().exclusionCount = 0;
+    }
+
+    inline void addExclusion(float x0, float y0, float x1, float y1) {
+        State& s = state();
+        if (s.exclusionCount >= State::kMaxExclusions) { return; }
+        float* r = s.exclusions[s.exclusionCount++];
+        r[0] = x0;
+        r[1] = y0;
+        r[2] = x1;
+        r[3] = y1;
+    }
+
+    inline bool inExclusion(float x, float y) {
+        const State& s = state();
+        for (int i = 0; i < s.exclusionCount; i++) {
+            const float* r = s.exclusions[i];
+            if (x >= r[0] && x < r[2] && y >= r[1] && y < r[3]) { return true; }
+        }
+        return false;
     }
 
     // 面板不可见或有弹窗时调用

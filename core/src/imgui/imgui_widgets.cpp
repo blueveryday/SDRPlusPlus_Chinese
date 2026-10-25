@@ -158,6 +158,8 @@ void ImGui::TextEx(const char* text, const char* text_end, ImGuiTextFlags flags)
     if (text == text_end)
         text = text_end = "";
 
+    I18nMapText(text, text_end, false); // [SDR++] 界面翻译
+
     // Calculate length
     const char* text_begin = text;
     if (text_end == NULL)
@@ -275,6 +277,7 @@ void ImGui::TextV(const char* fmt, va_list args)
 
     // FIXME-OPT: Handle the %s shortcut?
     ImGuiContext& g = *GImGui;
+    fmt = I18nMapFormat(fmt); // [SDR++] 界面翻译（格式串，译文的 % 参数已在加载时校验过）
     const char* text_end = g.TempBuffer + ImFormatStringV(g.TempBuffer, IM_ARRAYSIZE(g.TempBuffer), fmt, args);
     TextEx(g.TempBuffer, text_end, ImGuiTextFlags_NoWidthForLargeClippedText);
 }
@@ -358,6 +361,7 @@ void ImGui::LabelTextV(const char* label, const char* fmt, va_list args)
     const float w = CalcItemWidth();
 
     const char* value_text_begin = &g.TempBuffer[0];
+    fmt = I18nMapFormat(fmt); // [SDR++]
     const char* value_text_end = value_text_begin + ImFormatStringV(g.TempBuffer, IM_ARRAYSIZE(g.TempBuffer), fmt, args);
     const ImVec2 value_size = CalcTextSize(value_text_begin, value_text_end, false);
     const ImVec2 label_size = CalcTextSize(label, NULL, true);
@@ -394,6 +398,7 @@ void ImGui::BulletTextV(const char* fmt, va_list args)
     const ImGuiStyle& style = g.Style;
 
     const char* text_begin = g.TempBuffer;
+    fmt = I18nMapFormat(fmt); // [SDR++]
     const char* text_end = text_begin + ImFormatStringV(g.TempBuffer, IM_ARRAYSIZE(g.TempBuffer), fmt, args);
     const ImVec2 label_size = CalcTextSize(text_begin, text_end, false);
     const ImVec2 total_size = ImVec2(g.FontSize + (label_size.x > 0.0f ? (label_size.x + style.FramePadding.x * 2) : 0.0f), label_size.y);  // Empty text doesn't add padding
@@ -3898,6 +3903,14 @@ static bool InputTextFilterCharacter(unsigned int* p_char, ImGuiInputTextFlags f
 // - If you want to use ImGui::InputText() with std::string, see misc/cpp/imgui_stdlib.h
 // (FIXME: Rather confusing and messy function, among the worse part of our codebase, expecting to rewrite a V2 at some point.. Partly because we are
 //  doing UTF8 > U16 > UTF8 conversions on the go to easily interface with stb_textedit. Ideally should stay in UTF-8 all the time. See https://github.com/nothings/stb/issues/188)
+// 触摸屏（Android）上没有键盘快捷键，由原生的编辑工具栏通过 TextInputAction() 请求操作，
+// 在当前获得焦点的输入框里按“按下了对应快捷键”的方式处理：1 全选，2 复制，3 剪切，4 粘贴，5 删除。
+static int g_PendingTextAction = 0;
+void ImGui::TextInputAction(int action)
+{
+    g_PendingTextAction = action;
+}
+
 bool ImGui::InputTextEx(const char* label, const char* hint, char* buf, int buf_size, const ImVec2& size_arg, ImGuiInputTextFlags flags, ImGuiInputTextCallback callback, void* callback_user_data)
 {
     ImGuiWindow* window = GetCurrentWindow();
@@ -4248,9 +4261,11 @@ bool ImGui::InputTextEx(const char* label, const char* hint, char* buf, int buf_
         const bool is_shift_key_only = (io.KeyMods == ImGuiKeyModFlags_Shift);
         const bool is_shortcut_key = g.IO.ConfigMacOSXBehaviors ? (io.KeyMods == ImGuiKeyModFlags_Super) : (io.KeyMods == ImGuiKeyModFlags_Ctrl);
 
-        const bool is_cut   = ((is_shortcut_key && IsKeyPressed(ImGuiKey_X)) || (is_shift_key_only && IsKeyPressed(ImGuiKey_Delete))) && !is_readonly && !is_password && (!is_multiline || state->HasSelection());
-        const bool is_copy  = ((is_shortcut_key && IsKeyPressed(ImGuiKey_C)) || (is_ctrl_key_only  && IsKeyPressed(ImGuiKey_Insert))) && !is_password && (!is_multiline || state->HasSelection());
-        const bool is_paste = ((is_shortcut_key && IsKeyPressed(ImGuiKey_V)) || (is_shift_key_only && IsKeyPressed(ImGuiKey_Insert))) && !is_readonly;
+        const int text_action = g_PendingTextAction;
+        g_PendingTextAction = 0;
+        const bool is_cut   = ((is_shortcut_key && IsKeyPressed(ImGuiKey_X)) || (is_shift_key_only && IsKeyPressed(ImGuiKey_Delete)) || text_action == 3) && !is_readonly && !is_password && (!is_multiline || state->HasSelection());
+        const bool is_copy  = ((is_shortcut_key && IsKeyPressed(ImGuiKey_C)) || (is_ctrl_key_only  && IsKeyPressed(ImGuiKey_Insert)) || text_action == 2) && !is_password && (!is_multiline || state->HasSelection());
+        const bool is_paste = ((is_shortcut_key && IsKeyPressed(ImGuiKey_V)) || (is_shift_key_only && IsKeyPressed(ImGuiKey_Insert)) || text_action == 4) && !is_readonly;
         const bool is_undo  = ((is_shortcut_key && IsKeyPressed(ImGuiKey_Z)) && !is_readonly && is_undoable);
         const bool is_redo  = ((is_shortcut_key && IsKeyPressed(ImGuiKey_Y)) || (is_osx_shift_shortcut && IsKeyPressed(ImGuiKey_Z))) && !is_readonly && is_undoable;
 
@@ -4307,7 +4322,7 @@ bool ImGui::InputTextEx(const char* label, const char* hint, char* buf, int buf_
             state->OnKeyPressed(is_undo ? STB_TEXTEDIT_K_UNDO : STB_TEXTEDIT_K_REDO);
             state->ClearSelection();
         }
-        else if (is_shortcut_key && IsKeyPressed(ImGuiKey_A))
+        else if ((is_shortcut_key && IsKeyPressed(ImGuiKey_A)) || text_action == 1)
         {
             state->SelectAll();
             state->CursorFollow = true;
@@ -4359,6 +4374,15 @@ bool ImGui::InputTextEx(const char* label, const char* hint, char* buf, int buf_
                 }
                 MemFree(clipboard_filtered);
             }
+        }
+        else if (text_action == 5 && !is_readonly)
+        {
+            // 删除：有选中内容时删除选中部分，否则删除光标前一个字符
+            if (state->HasSelection())
+                stb_textedit_cut(state, &state->Stb);
+            else
+                state->OnKeyPressed(STB_TEXTEDIT_K_BACKSPACE);
+            state->CursorFollow = true;
         }
 
         // Update render selection flag after events have been handled, so selection highlight can be displayed during the same frame.

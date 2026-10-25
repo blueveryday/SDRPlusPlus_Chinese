@@ -6,6 +6,7 @@
 #include <imgui_internal.h>
 #include <gui/style.h>
 #include <utils/net.h>
+#include <utils/i18n.h>
 #include <utils/proto/http.h>
 #include <json.hpp>
 #include <algorithm>
@@ -127,7 +128,7 @@ struct KiwiSDRMapSelector {
         }
         if (!tested.empty()) {
             ImGui::SameLine();
-            if (doFingerButton("使用已测试的服务器: " + tested)) {
+            if (doFingerButton(std::string(i18n::tr("使用已测试的服务器: ")) + tested)) {
                 onSelected(tested, testedLoc);
                 ImGui::CloseCurrentPopup();
             }
@@ -240,7 +241,7 @@ private:
                 st->testedServer.clear();
                 st->testedLoc.clear();
                 st->testInProgress = true;
-                st->testStatus = "正在测试 " + s.url + " ...";
+                st->testStatus = std::string(i18n::tr("正在测试 ")) + s.url + " ...";
                 auto state = st;
                 auto copy = s;
                 std::thread([state, copy]() { testServer(state, copy); }).detach();
@@ -259,7 +260,7 @@ private:
     static void testServer(std::shared_ptr<State> state, ServerEntry s) {
         auto ep = kiwiParseSite(s.url);
         if (!ep.error.empty()) {
-            setStatus(state, "无法使用该地址 (" + s.url + "): " + ep.error);
+            setStatus(state, std::string(i18n::tr("无法使用该地址 (")) + s.url + "): " + ep.error);
             state->testInProgress = false;
             return;
         }
@@ -274,7 +275,7 @@ private:
         testClient.init(hostPort);
         testClient.onConnected = [&]() {
             connected = true;
-            setStatus(state, "已连接 " + hostPort + " ...");
+            setStatus(state, std::string(i18n::tr("已连接 ")) + hostPort + " ...");
             testClient.tune(14074000, KiwiSDRClient::TUNE_IQ);
         };
         testClient.onDisconnected = [&]() {
@@ -301,12 +302,12 @@ private:
 
         std::lock_guard<std::mutex> lk(state->mtx);
         if (gotData) {
-            state->testStatus = "已收到数据, 服务器可用: " + hostPort;
+            state->testStatus = std::string(i18n::tr("已收到数据, 服务器可用: ")) + hostPort;
             state->testedServer = hostPort;
             state->testedLoc = s.loc;
         }
         else {
-            state->testStatus = "未收到数据, 服务器不可用: " + hostPort;
+            state->testStatus = std::string(i18n::tr("未收到数据, 服务器不可用: ")) + hostPort;
         }
         state->testInProgress = false;
     }
@@ -377,7 +378,7 @@ private:
         int hdrErr = http.recvResponseHeader(rs, 10000);
         if (hdrErr) {
             sock->close();
-            throw std::runtime_error("接收 HTTP 响应头失败 (err=" + std::to_string(hdrErr) + ")");
+            throw std::runtime_error(std::string(i18n::tr("接收 HTTP 响应头失败 (err=")) + std::to_string(hdrErr) + ")");
         }
 
         int code = (int)rs.getStatusCode();
@@ -389,8 +390,8 @@ private:
             sock->close();
             std::string snippet = body.substr(0, 200);
             throw std::runtime_error(
-                "服务器返回 HTTP " + std::to_string(code) + " " + rs.getStatusString() +
-                " | 响应前200字节: " + snippet);
+                std::string(i18n::tr("服务器返回 HTTP ")) + std::to_string(code) + " " + rs.getStatusString() +
+                std::string(i18n::tr(" | 响应前200字节: ")) + snippet);
         }
 
         std::string response;

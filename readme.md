@@ -3,21 +3,36 @@
 # SDR++, 轻量的 SDR 软件<br>
 
 SDR++ 是一款跨平台且开源的软件定义无线电 (SDR) 软件，其设计目标是精简高效且易于使用。
+SDR++ is a cross-platform, open-source software-defined radio (SDR) application designed to be lightweight, efficient, and easy to use.
 
-> 当前分支是 SDR++ CE的中文版本。
-> 当前版本v1.3.0 CE版
+> 当前分支是 SDR++ CE多国语言版版本。
+> 当前版本v1.3.1 CE多国语言版
 
-<img width="1920" height="1020" alt="main" src="https://github.com/user-attachments/assets/7f2603d0-2cec-44c2-8be3-debd760ec799" />
-<img width="1920" height="1020" alt="map" src="https://github.com/user-attachments/assets/b32c6252-be67-467b-8e51-e68ce048569c" />
+> The current branch is the SDR++ CE multilingual version.
+> Current version: v1.3.1 CE multilingual version.
 
 ## 特性
 
 * 集成kiwisdr信号源
 * Feat. SDR++ CE模块特征
+* 支持Ipv6地址或域名连接
+* 优化Android操作，修复Android若干bug
+* 支持多语言界面选择, 用户可自定义语言文件
+
+## Features
+
+* Integrated KiwiSDR signal source
+* Includes SDR++ CE module features
+* Supports connections via IPv6 addresses or domain names
+* Optimized for Android, fixed several Android-related bugs
+* Supports multiple interface languages, with options for users to create custom language files
+
+<img width="1920" height="1020" alt="main" src="https://github.com/user-attachments/assets/7f2603d0-2cec-44c2-8be3-debd760ec799" />
+<img width="1920" height="1020" alt="map" src="https://github.com/user-attachments/assets/b32c6252-be67-467b-8e51-e68ce048569c" />
 
 # 下载
 
-## 中文版本
+## 多国语言版本
 
 [发布页面](https://github.com/blueveryday/SDRPlusPlus_Chinese/releases)下载最新版本
 
@@ -522,6 +537,7 @@ The signal_path module is not optional and always included.
 | rigctl_client        | Working     | -            | OPT_BUILD_RIGCTL_CLIENT       |     false        |
 | rigctl_server        | Working     | -            | OPT_BUILD_RIGCTL_SERVER       |     false        |
 | scanner              | Working     | -            | OPT_BUILD_SCANNER             |     true         |
+| change_language      | Working     | -            | OPT_BUILD_CHANGE_LANGUAGE     |     true         |
 
 # Troubleshooting
 

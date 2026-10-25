@@ -7,11 +7,13 @@
 #include <gui/icons.h>
 #include <version.h>
 #include <utils/flog.h>
+#include <utils/i18n.h>
 #include <gui/widgets/bandplan.h>
 #include <stb_image.h>
 #include <config.h>
 #include <core.h>
 #include <filesystem>
+#include <fstream>
 #include <gui/menus/theme.h>
 #include <gui/menus/display.h>
 #include <backend.h>
@@ -229,6 +231,7 @@ int sdrpp_main(int argc, char* argv[]) {
     // defConfig["moduleInstances"]["Rigctl Client"] = "rigctl_client";
     // TODO: Enable rigctl_client when ready
     defConfig["moduleInstances"]["扫描器"] = "scanner";
+    defConfig["moduleInstances"]["语言"] = "change_language";
 
 
     // Themes
@@ -265,6 +268,9 @@ int sdrpp_main(int argc, char* argv[]) {
     defConfig["windowSize"]["w"] = 1280;
 
     defConfig["vfoOffsets"] = json::object();
+
+    // 语言模块（change_language）是否已经为旧配置补过默认实例，见下面 “Seed the language module”
+    defConfig["languageModuleSeeded"] = false;
 
     defConfig["vfoColors"]["电台"] = "#FFFFFF";
 
@@ -324,6 +330,7 @@ int sdrpp_main(int argc, char* argv[]) {
     core::configManager.conf["modules"][modCount++] = "recorder.so";
     core::configManager.conf["modules"][modCount++] = "rigctl_server.so";
     core::configManager.conf["modules"][modCount++] = "scanner.so";
+    core::configManager.conf["modules"][modCount++] = "change_language.so";
 #endif
 
     // Fix missing elements in config
@@ -359,6 +366,21 @@ int sdrpp_main(int argc, char* argv[]) {
         core::configManager.conf["moduleInstances"][_name] = newMod;
     }
 
+    // Seed the language module: 旧配置里没有“语言”模块实例时补一个默认实例。
+    // 只补一次（languageModuleSeeded），用户之后自己在模块管理器里删除也不会再被加回来。
+    if (!core::configManager.conf.value("languageModuleSeeded", false)) {
+        json& insts = core::configManager.conf["moduleInstances"];
+        bool hasLangModule = false;
+        for (auto const& [_instName, _inst] : insts.items()) {
+            if (_inst.is_object() && _inst.value("module", "") == "change_language") { hasLangModule = true; break; }
+        }
+        if (!hasLangModule && !insts.contains("语言")) {
+            insts["语言"]["module"] = "change_language";
+            insts["语言"]["enabled"] = true;
+        }
+        core::configManager.conf["languageModuleSeeded"] = true;
+    }
+
     // Load UI scaling
     style::uiScale = core::configManager.conf["uiScale"];
 
@@ -376,6 +398,37 @@ int sdrpp_main(int argc, char* argv[]) {
     if (!std::filesystem::is_directory(resDir)) {
         flog::error("Resource directory doesn't exist! Please make sure that you've configured it correctly in config.json (check readme for details)");
         return 1;
+    }
+
+    // 启动时尽早应用界面语言（默认英文 en-US），这样加载画面也是目标语言。
+    // 只有“语言”模块（change_language）存在且启用时才生效；之后模块实例化时会再次应用同一语言并提供切换界面。
+    {
+        std::string lang = "en-US";
+        try {
+            std::ifstream lf(root + "/change_language_config.json");
+            if (lf.is_open()) { lang = json::parse(lf).value("language", lang); }
+        }
+        catch (...) {}
+
+        bool langModuleOn = false;
+        core::configManager.acquire();
+        for (auto const& [_n, _inst] : core::configManager.conf["moduleInstances"].items()) {
+            if (_inst.is_object() && _inst.value("module", "") == "change_language" && _inst.value("enabled", true)) { langModuleOn = true; }
+        }
+        core::configManager.release();
+
+        // 语言标签只允许字母、数字、连字符和下划线，防止路径穿越
+        bool safeCode = !lang.empty();
+        for (char c : lang) { if (!(isalnum((unsigned char)c) || c == '-' || c == '_')) { safeCode = false; } }
+
+        if (langModuleOn && safeCode && lang != "zh-CN") {
+            // 用户目录优先于内置目录
+            for (auto const& dir : { std::filesystem::path(root) / "lang", std::filesystem::path(resDir) / "lang" }) {
+                std::error_code ec;
+                std::filesystem::path file = dir / (lang + ".json");
+                if (std::filesystem::is_regular_file(file, ec) && i18n::load(file.string())) { break; }
+            }
+        }
     }
 
     // Initialize backend

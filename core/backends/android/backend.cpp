@@ -15,6 +15,8 @@
 #include <gui/style.h>
 #include <gui/menus/theme.h>
 #include <gui/touch_scroll.h>
+#include <imgui_internal.h>
+#include <utils/i18n.h>
 #include <cmath>
 #include <cfloat>
 #include <filesystem>
@@ -40,6 +42,11 @@ namespace backend {
     int PollUnicodeChars();
     int HideSoftKeyboardInput();
     void ProcessPendingDialogResults();
+    // 输入框编辑工具栏与系统剪贴板（见下面 backend 命名空间里的实现）
+    const char* androidGetClipboard(void* userData);
+    void androidSetClipboard(void* userData, const char* text);
+    void updateEditBarLabels();
+    void processEditActions();
 
     void doPartialInit() {
         std::string root = (std::string)core::args["root"];
@@ -103,6 +110,8 @@ namespace backend {
 
             if (!isTouch || !st.valid) { return false; }
             if (x < st.x0 || x >= st.x1 || y < st.y0 || y >= st.y1) { return false; }
+            // 按在模块自己的滚动条上：直接交给 ImGui，让滚动条可以拖动
+            if (touchscroll::inExclusion(x, y)) { return false; }
 
             st.phase = touchscroll::State::PENDING;
             st.pressX = x;
@@ -245,6 +254,10 @@ namespace backend {
         // FIXME: Consider using LoadIniSettingsFromMemory() / SaveIniSettingsToMemory() to save in appropriate location for Android.
         io.IniFilename = NULL;
 
+        // 输入框的复制/剪切/粘贴使用系统剪贴板
+        io.GetClipboardTextFn = androidGetClipboard;
+        io.SetClipboardTextFn = androidSetClipboard;
+
         // Setup Platform/Renderer backends
         ImGui_ImplAndroid_Init(app->window);
         ImGui_ImplOpenGL3_Init("#version 300 es");
@@ -314,11 +327,17 @@ namespace backend {
 
                 // Open on-screen (soft) input if requested by Dear ImGui
                 static bool WantTextInputLast = false;
-                if (io.WantTextInput && !WantTextInputLast)
-                ShowSoftKeyboardInput();
-                else if (!io.WantTextInput && WantTextInputLast)
-                HideSoftKeyboardInput();
+                if (io.WantTextInput && !WantTextInputLast) {
+                    updateEditBarLabels();
+                    ShowSoftKeyboardInput();
+                }
+                else if (!io.WantTextInput && WantTextInputLast) {
+                    HideSoftKeyboardInput();
+                }
                 WantTextInputLast = io.WantTextInput;
+
+                // 处理输入框编辑工具栏（全选/复制/剪切/粘贴/删除）点出来的操作
+                processEditActions();
 
                 // Render
                 beginFrame();
@@ -720,6 +739,72 @@ namespace backend {
         }
     }
 
+    // ---- 系统剪贴板 ----
+    // ImGui 的输入框复制/剪切/粘贴通过这两个函数读写剪贴板，实际由 MainActivity（Java 端）完成
+    const char* androidGetClipboard(void* userData) {
+        static std::string text;
+        text.clear();
+        withActivity([&](JNIEnv* env, jobject activity, jclass cls) {
+            jmethodID method = env->GetMethodID(cls, "getClipboardText", "()Ljava/lang/String;");
+            if (!method) { return; }
+            jstring result = (jstring)env->CallObjectMethod(activity, method);
+            if (result) {
+                const char* chars = env->GetStringUTFChars(result, nullptr);
+                if (chars) { text = chars; env->ReleaseStringUTFChars(result, chars); }
+                env->DeleteLocalRef(result);
+            }
+        });
+        return text.c_str();
+    }
+
+    void androidSetClipboard(void* userData, const char* text) {
+        if (!text) { return; }
+        withActivity([&](JNIEnv* env, jobject activity, jclass cls) {
+            jmethodID method = env->GetMethodID(cls, "setClipboardText", "(Ljava/lang/String;)V");
+            if (!method) { return; }
+            jstring jText = env->NewStringUTF(text);
+            env->CallVoidMethod(activity, method, jText);
+            env->DeleteLocalRef(jText);
+        });
+    }
+
+    // ---- 输入框编辑工具栏 ----
+    // 软键盘弹出时，Java 端在键盘上方显示一排原生按钮（全选/复制/剪切/粘贴/删除）。
+    // 用原生按钮而不是 ImGui 控件，是因为点击 ImGui 里的其他控件会让输入框失去焦点。
+    // 按钮点击后通过 JNI 回调把操作放进队列，渲染线程每帧取出一个交给当前输入框处理。
+    static std::mutex g_editMtx;
+    static std::vector<int> g_editActions;
+
+    void updateEditBarLabels() {
+        // 文字走界面语言翻译；语言文件里的原文键是下面这几个中文词
+        std::string labels[5] = { i18n::tr("全选"), i18n::tr("复制"), i18n::tr("剪切"), i18n::tr("粘贴"), i18n::tr("删除") };
+        withActivity([&](JNIEnv* env, jobject activity, jclass cls) {
+            jmethodID method = env->GetMethodID(cls, "setEditBarLabels", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
+            if (!method) { return; }
+            jstring j[5];
+            for (int i = 0; i < 5; i++) { j[i] = env->NewStringUTF(labels[i].c_str()); }
+            env->CallVoidMethod(activity, method, j[0], j[1], j[2], j[3], j[4]);
+            for (int i = 0; i < 5; i++) { env->DeleteLocalRef(j[i]); }
+        });
+    }
+
+    void processEditActions() {
+        int action = 0;
+        {
+            std::lock_guard<std::mutex> lck(g_editMtx);
+            if (!g_editActions.empty()) {
+                action = g_editActions.front();
+                g_editActions.erase(g_editActions.begin());
+            }
+        }
+        if (action != 0) { ImGui::TextInputAction(action); }
+    }
+
+    void pushEditAction(int action) {
+        std::lock_guard<std::mutex> lck(g_editMtx);
+        if (g_editActions.size() < 8) { g_editActions.push_back(action); }
+    }
+
     static std::string jstringToStd(JNIEnv* env, jstring str) {
         if (!str) { return ""; }
         const char* chars = env->GetStringUTFChars(str, nullptr);
@@ -737,6 +822,11 @@ extern "C" JNIEXPORT void JNICALL Java_org_sdrpp_sdrpp_SdrFilePicker_nativeOnRes
         backend::g_openCallback = nullptr;
         backend::g_pendingDialogResults.push_back([cb, result]() { cb(result); });
     }
+}
+
+// 输入框编辑工具栏的按钮：1 全选，2 复制，3 剪切，4 粘贴，5 删除
+extern "C" JNIEXPORT void JNICALL Java_org_sdrpp_sdrpp_MainActivity_nativeEditAction(JNIEnv* env, jobject thiz, jint action) {
+    backend::pushEditAction((int)action);
 }
 
 extern "C" JNIEXPORT void JNICALL Java_org_sdrpp_sdrpp_SdrFilePicker_nativeOnResultSave(JNIEnv* env, jobject thiz, jstring result) {

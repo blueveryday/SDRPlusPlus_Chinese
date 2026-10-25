@@ -2,6 +2,7 @@
 #include <string>
 #include <cstring>
 #include <cerrno>
+#include <utils/i18n.h>
 
 #ifdef _WIN32
 #include <WinSock2.h>
@@ -132,10 +133,10 @@ namespace net {
 
         // 把连接错误码转换成给用户看的中文说明
         inline std::string describeConnectError(int err) {
-            if (isTimeout(err)) { return "连接超时，服务器无响应或被防火墙拦截"; }
-            if (isRefused(err)) { return "连接被拒绝，服务器未在该端口监听"; }
-            if (isUnreachable(err)) { return "网络或主机不可达，请检查网络（IPv6 地址需要本机和服务器都有可用的 IPv6 网络）"; }
-            return "连接失败，错误码 " + std::to_string(err);
+            if (isTimeout(err)) { return i18n::tr("连接超时，服务器无响应或被防火墙拦截"); }
+            if (isRefused(err)) { return i18n::tr("连接被拒绝，服务器未在该端口监听"); }
+            if (isUnreachable(err)) { return i18n::tr("网络或主机不可达，请检查网络（IPv6 地址需要本机和服务器都有可用的 IPv6 网络）"); }
+            return std::string(i18n::tr("连接失败，错误码 ")) + std::to_string(err);
         }
     }
 }

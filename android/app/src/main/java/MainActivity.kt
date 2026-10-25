@@ -10,6 +10,13 @@ import android.content.pm.PackageManager
 import android.hardware.usb.*
 import android.Manifest
 import android.os.Bundle
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.graphics.Color
+import android.view.Gravity
+import android.widget.Button
+import android.widget.FrameLayout
+import android.widget.LinearLayout
 import android.os.Build
 import android.view.KeyEvent
 import android.view.View
@@ -164,6 +171,14 @@ class MainActivity : NativeActivity() {
     var SDR_FD: Int = -1
 
     private var inputView: SdrInputView? = null
+
+    // 软键盘上方的输入框编辑工具栏：全选 / 复制 / 剪切 / 粘贴 / 删除
+    private var editBar: LinearLayout? = null
+    private val editButtons = ArrayList<Button>()
+    private var clipboard: ClipboardManager? = null
+
+    // 编辑工具栏按钮的回调：1 全选，2 复制，3 剪切，4 粘贴，5 删除（实现见原生端 backend.cpp）
+    external fun nativeEditAction(action: Int)
     private val unicodeCharacterQueue: LinkedBlockingQueue<Int> = LinkedBlockingQueue()
 
     fun checkAndAsk(permission: String) {
@@ -208,6 +223,9 @@ class MainActivity : NativeActivity() {
 
         inputView = SdrInputView(this, { code -> unicodeCharacterQueue.offer(code) }, { onImeDismissed() })
         addContentView(inputView, ViewGroup.LayoutParams(1, 1))
+
+        clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        createEditBar()
     }
 
     override fun onDestroy() {
@@ -225,9 +243,59 @@ class MainActivity : NativeActivity() {
         window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
     }
 
+    private fun createEditBar() {
+        val bar = LinearLayout(this)
+        bar.orientation = LinearLayout.HORIZONTAL
+        bar.setBackgroundColor(Color.parseColor("#E6202020"))
+        bar.visibility = View.GONE
+        val names = arrayOf("全选", "复制", "剪切", "粘贴", "删除")
+        for (i in names.indices) {
+            val btn = Button(this)
+            btn.text = names[i]
+            btn.setTextColor(Color.WHITE)
+            btn.setBackgroundColor(Color.TRANSPARENT)
+            // 按钮不能抢走输入焦点，否则软键盘会被收起
+            btn.isFocusable = false
+            btn.isFocusableInTouchMode = false
+            val action = i + 1
+            btn.setOnClickListener { nativeEditAction(action) }
+            bar.addView(btn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.0f))
+            editButtons.add(btn)
+        }
+        addContentView(bar, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
+        editBar = bar
+    }
+
+    // 供原生代码调用：按当前界面语言设置工具栏按钮文字
+    fun setEditBarLabels(a: String, b: String, c: String, d: String, e: String) {
+        runOnUiThread {
+            val labels = arrayOf(a, b, c, d, e)
+            for (i in editButtons.indices) { editButtons[i].text = labels[i] }
+        }
+    }
+
+    // 供原生代码调用：读写系统剪贴板
+    fun getClipboardText(): String {
+        return try {
+            val clip = clipboard?.primaryClip
+            if (clip != null && clip.itemCount > 0) clip.getItemAt(0).coerceToText(this).toString() else ""
+        } catch (e: Exception) {
+            ""
+        }
+    }
+
+    fun setClipboardText(text: String) {
+        try {
+            clipboard?.setPrimaryClip(ClipData.newPlainText("SDR++", text))
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "setClipboardText failed", e)
+        }
+    }
+
     fun showSoftInput() {
         runOnUiThread {
             val view = inputView ?: return@runOnUiThread
+            editBar?.visibility = View.VISIBLE
 
             // 全屏窗口不会随键盘缩小，所以输入期间临时取消全屏，并让窗口随键盘调整大小，
             // 这样键盘弹出后程序界面缩小到键盘上方，输入框不会被遮住
@@ -246,6 +314,7 @@ class MainActivity : NativeActivity() {
 
     fun hideSoftInput() {
         runOnUiThread {
+            editBar?.visibility = View.GONE
             val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
             imm.hideSoftInputFromWindow(inputView?.windowToken, 0)
             onImeDismissed()
@@ -254,6 +323,7 @@ class MainActivity : NativeActivity() {
 
     // 键盘收起后恢复全屏沉浸模式
     private fun onImeDismissed() {
+        editBar?.visibility = View.GONE
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING or WindowManager.LayoutParams.SOFT_INPUT_STATE_HIDDEN)
         window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
         hideSystemBars()

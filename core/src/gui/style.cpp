@@ -4,6 +4,8 @@
 #include <config.h>
 #include <utils/flog.h>
 #include <filesystem>
+#include <utils/i18n.h>
+#include <cstdlib>
 
 namespace style {
     ImFont* baseFont;
@@ -67,7 +69,30 @@ namespace style {
         hugeBuilder.BuildRanges(&hugeRanges);
         
         // Add bigger fonts for frequency select and title
-        baseFont = fonts->AddFontFromFileTTF(((std::string)(resDir + "/fonts/MiSans-Regular.ttf")).c_str(), 16.0f * uiScale, NULL, baseRanges.Data);
+        // 中文界面在 Windows 上使用系统自带的微软雅黑（msyh），部分生僻字在 MiSans 里缺字会显示成乱码/方块。
+        // 微软雅黑不能随程序分发，所以只在系统里找得到时使用，找不到就退回内置的 MiSans。
+        // 字体在启动时加载，所以切换到/离开中文后需要重启程序才会换字体。
+        baseFont = NULL;
+#ifdef _WIN32
+        {
+            std::string langCode = i18n::currentCode(); // 空表示源码原文，即中文
+            bool chinese = langCode.empty() || langCode.rfind("zh", 0) == 0;
+            if (chinese) {
+                const char* winDir = std::getenv("WINDIR");
+                std::string fontDir = std::string(winDir ? winDir : "C:\\Windows") + "\\Fonts\\";
+                for (const char* file : { "msyh.ttc", "msyh.ttf" }) {
+                    std::string path = fontDir + file;
+                    std::error_code ec;
+                    if (!std::filesystem::is_regular_file(path, ec)) { continue; }
+                    baseFont = fonts->AddFontFromFileTTF(path.c_str(), 16.0f * uiScale, NULL, baseRanges.Data);
+                    if (baseFont) { flog::info("使用字体: {0}", path); break; }
+                }
+            }
+        }
+#endif
+        if (!baseFont) {
+            baseFont = fonts->AddFontFromFileTTF(((std::string)(resDir + "/fonts/MiSans-Regular.ttf")).c_str(), 16.0f * uiScale, NULL, baseRanges.Data);
+        }
         bigFont = fonts->AddFontFromFileTTF(((std::string)(resDir + "/fonts/MiSans-Regular.ttf")).c_str(), 45.0f * uiScale, NULL, bigRanges.Data);
         hugeFont = fonts->AddFontFromFileTTF(((std::string)(resDir + "/fonts/MiSans-Regular.ttf")).c_str(), 128.0f * uiScale, NULL, hugeRanges.Data);
 

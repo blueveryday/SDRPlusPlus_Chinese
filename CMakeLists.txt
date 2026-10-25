@@ -67,6 +67,7 @@ option(OPT_BUILD_RECORDER "Audio and baseband recorder" ON)
 option(OPT_BUILD_RIGCTL_CLIENT "Rigctl client to make SDR++ act as a panadapter" ON)
 option(OPT_BUILD_RIGCTL_SERVER "Rigctl backend for controlling SDR++ with software like gpredict" ON)
 option(OPT_BUILD_SCANNER "Frequency scanner" ON)
+option(OPT_BUILD_CHANGE_LANGUAGE "Interface language switcher" ON)
 option(OPT_BUILD_SCHEDULER "Build the scheduler" OFF)
 
 # Other options
@@ -343,6 +344,10 @@ if (OPT_BUILD_SCANNER)
 add_subdirectory("misc_modules/scanner")
 endif (OPT_BUILD_SCANNER)
 
+if (OPT_BUILD_CHANGE_LANGUAGE)
+add_subdirectory("misc_modules/change_language")
+endif (OPT_BUILD_CHANGE_LANGUAGE)
+
 if (OPT_BUILD_SCHEDULER)
 add_subdirectory("misc_modules/scheduler")
 endif (OPT_BUILD_SCHEDULER)
@@ -409,6 +414,7 @@ install(DIRECTORY ${CMAKE_SOURCE_DIR}/root/res/colormaps DESTINATION share/sdrpp
 install(DIRECTORY ${CMAKE_SOURCE_DIR}/root/res/cty DESTINATION share/sdrpp)
 install(DIRECTORY ${CMAKE_SOURCE_DIR}/root/res/fonts DESTINATION share/sdrpp)
 install(DIRECTORY ${CMAKE_SOURCE_DIR}/root/res/icons DESTINATION share/sdrpp)
+install(DIRECTORY ${CMAKE_SOURCE_DIR}/root/res/lang DESTINATION share/sdrpp)
 install(DIRECTORY ${CMAKE_SOURCE_DIR}/root/res/themes DESTINATION share/sdrpp)
 configure_file(${CMAKE_SOURCE_DIR}/sdrpp.desktop ${CMAKE_CURRENT_BINARY_DIR}/sdrpp.desktop @ONLY)
 

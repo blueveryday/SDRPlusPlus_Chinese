@@ -323,7 +323,7 @@ namespace net {
         struct addrinfo* results = detail::resolveHost(target, port, SOCK_STREAM);
         if (!results) {
             flog::error("Could not resolve host: {}", target);
-            throw std::runtime_error("无法解析主机名 \"" + target + "\"，请检查域名或 IP 地址是否正确");
+            throw std::runtime_error(std::string(i18n::tr("无法解析主机名 \"")) + target + i18n::tr("\"，请检查域名或 IP 地址是否正确"));
         }
 
         // 依次尝试解析出的每个地址（域名可能同时有 IPv6 和 IPv4），每个地址最多等待 8 秒
@@ -362,9 +362,9 @@ namespace net {
 
         if (!connected) {
             std::string shownHost = (target.find(':') != std::string::npos) ? ("[" + target + "]") : target;
-            std::string msg = "无法连接到 " + shownHost + ":" + std::to_string(port) + " (" + detail::describeConnectError(lastErr) + ")";
-            if (attempts > 1) { msg += "，已尝试 " + std::to_string(attempts) + " 个地址"; }
-            else if (triedV6) { msg += "，仅尝试了 IPv6 地址"; }
+            std::string msg = std::string(i18n::tr("无法连接到 ")) + shownHost + ":" + std::to_string(port) + " (" + detail::describeConnectError(lastErr) + ")";
+            if (attempts > 1) { msg += std::string(i18n::tr("，已尝试 ")) + std::to_string(attempts) + i18n::tr(" 个地址"); }
+            else if (triedV6) { msg += i18n::tr("，仅尝试了 IPv6 地址"); }
             throw std::runtime_error(msg);
             return NULL;
         }

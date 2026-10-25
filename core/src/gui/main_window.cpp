@@ -1,4 +1,8 @@
 #include <gui/main_window.h>
+#include <utils/i18n.h>
+#ifdef __ANDROID__
+#include <imgui_internal.h>
+#endif
 #include <gui/gui.h>
 #include "imgui.h"
 #include <stdio.h>
@@ -109,7 +113,7 @@ void MainWindow::init() {
             }
             if (!file.is_regular_file()) { continue; }
             flog::info("正在加载 {0}", path);
-            LoadingScreen::show("正在加载 " + file.path().filename().string());
+            LoadingScreen::show(std::string(i18n::tr("正在加载 ")) + file.path().filename().string());
             core::moduleManager.loadModule(path);
         }
     }
@@ -128,7 +132,7 @@ void MainWindow::init() {
 #ifndef __ANDROID__
         std::string apath = std::filesystem::absolute(path).string();
         flog::info("正在加载 {0}", apath);
-        LoadingScreen::show("正在加载 " + std::filesystem::path(path).filename().u8string());
+        LoadingScreen::show(std::string(i18n::tr("正在加载 ")) + std::filesystem::path(path).filename().u8string());
         core::moduleManager.loadModule(apath);
 #else
         core::moduleManager.loadModule(path);
@@ -140,7 +144,7 @@ void MainWindow::init() {
         std::string mod = _module["module"];
         bool enabled = _module["enabled"];
         flog::info("初始化 {0} ({1})", name, mod);
-        LoadingScreen::show("初始化 " + name + " (" + mod + ")");
+        LoadingScreen::show(std::string(i18n::tr("初始化 ")) + name + " (" + mod + ")");
         core::moduleManager.createInstance(name, mod);
         if (!enabled) { core::moduleManager.disableInstance(name); }
     }
@@ -151,7 +155,7 @@ void MainWindow::init() {
     if (std::filesystem::is_directory(resourcesDir + "/colormaps")) {
         for (const auto& file : std::filesystem::directory_iterator(resourcesDir + "/colormaps")) {
             std::string path = file.path().generic_string();
-            LoadingScreen::show("正在加载 " + file.path().filename().string());
+            LoadingScreen::show(std::string(i18n::tr("正在加载 ")) + file.path().filename().string());
             flog::info("正在加载 {0}", path);
             if (file.path().extension().generic_string() != ".json") {
                 continue;
@@ -495,6 +499,9 @@ void MainWindow::draw() {
         ImGui::SetColumnWidth(1, std::max<int>(winSize.x - menuWidth - (60.0f * style::uiScale), 100.0f * style::uiScale));
         ImGui::SetColumnWidth(2, 60.0f * style::uiScale);
         ImGui::BeginChild("Left Column");
+#ifdef __ANDROID__
+        ImGuiWindow* leftPanelWindow = ImGui::GetCurrentWindow();
+#endif
 
 #ifdef __ANDROID__
         {
@@ -569,12 +576,33 @@ void MainWindow::draw() {
             ImGui::Spacing();
         }
 
+#ifdef __ANDROID__
+        {
+            // 收集面板内各子窗口（模块里带滚动条的列表）的滚动条位置，供输入层避让。
+            // 比滚动条本身略宽，方便手指按中。使用的是本帧的位置，下一帧的触摸事件生效。
+            touchscroll::clearExclusions();
+            ImGuiContext& g = *ImGui::GetCurrentContext();
+            float pad = 12.0f * style::uiScale;
+            for (ImGuiWindow* w : g.Windows) {
+                if (w == leftPanelWindow || !w->Active || w->Hidden || !w->ScrollbarY) { continue; }
+                bool inside = false;
+                for (ImGuiWindow* p = w->ParentWindow; p; p = p->ParentWindow) {
+                    if (p == leftPanelWindow) { inside = true; break; }
+                }
+                if (!inside) { continue; }
+                ImRect r = ImGui::GetWindowScrollbarRect(w, ImGuiAxis_Y);
+                touchscroll::addExclusion(r.Min.x - pad, r.Min.y, r.Max.x + pad, r.Max.y);
+            }
+        }
+#endif
+
         ImGui::EndChild();
     }
     else {
         // When hiding the menu bar
 #ifdef __ANDROID__
         touchscroll::clearPanel();
+        touchscroll::clearExclusions();
 #endif
         ImGui::Columns(3, "WindowColumns", false);
         ImGui::SetColumnWidth(0, 8 * style::uiScale);
