@@ -1,4 +1,4 @@
-name: Build SDR++ Multilingual Version
+name: Build SDR++
 
 on:
     push:
