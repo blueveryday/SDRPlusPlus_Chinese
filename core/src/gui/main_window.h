@@ -24,6 +24,8 @@ public:
 
     // TODO: Replace with it's own class
     void setVFO(double freq);
+    void setFFTMin(float min);
+    void setFFTMax(float max);
 
     void setPlayState(bool _playing);
     bool isPlaying();
@@ -55,6 +57,7 @@ private:
     int menuWidth = 300;
     bool grabbingMenu = false;
     int newWidth = 300;
+    bool androidMenuWidthApplied = false; // Android：启动后是否已把左侧工作区宽度设为屏幕的 1/3
     int fftHeight = 300;
     bool showMenu = true;
     int tuningMode = tuner::TUNER_MODE_NORMAL;

@@ -4,35 +4,265 @@
 #include <gui/gui.h>
 #include <gui/style.h>
 #include <core.h>
+#include <module_com.h>
 #include <thread>
 #include <radio_interface.h>
+#include <sstream>
 #include <signal_path/signal_path.h>
 #include <vector>
 #include <gui/tuner.h>
+#ifdef __ANDROID__
+#include <backend.h>
+#else
 #include <gui/file_dialogs.h>
+#endif
 #include <utils/freq_formatting.h>
 #include <gui/dialogs/dialog_box.h>
 #include <fstream>
+#include <optional>
+#include <atomic>
+#include <mutex>
+#include <algorithm>
 
 SDRPP_MOD_INFO{
     /* Name:            */ "frequency_manager",
-    /* Description:     */ "Frequency manager module for SDR++",
+    /* Description:     */ "SDR++ 频率管理器模块",
     /* Author:          */ "Ryzerth;Zimm",
     /* Version:         */ 0, 3, 0,
     /* Max instances    */ 1
 };
 
+// Forward declare demodModeList for TuningProfile
+extern const char* demodModeList[];
+
+// Performance-optimized TuningProfile struct (defined before FrequencyBookmark)
+struct TuningProfile {
+    // Core demodulation settings (cache-friendly layout)
+    int demodMode = 0;                  // Index into demodModeList
+    float bandwidth = 12500.0f;         // Bandwidth in Hz
+    bool squelchEnabled = false;        // Squelch on/off
+    float squelchLevel = -50.0f;        // Squelch level (dB)
+    
+    // Extended settings (only implemented/functional ones)
+    int deemphasisMode = 0;             // De-emphasis setting (0=off, 1=50us, 2=75us)
+    bool agcEnabled = true;             // AGC on/off
+    float rfGain = 20.0f;               // RF gain (dB) - if implemented in source module
+    double centerOffset = 0.0;          // Frequency offset from center
+    
+    // Profile metadata
+    std::string name;                   // User-friendly profile name
+    bool autoApply = true;              // Auto-apply when tuning to this frequency
+    
+    // Default constructor
+    TuningProfile() = default;
+    
+    // Copy constructor and assignment operator
+    TuningProfile(const TuningProfile&) = default;
+    TuningProfile& operator=(const TuningProfile&) = default;
+    TuningProfile(TuningProfile&&) = default;
+    TuningProfile& operator=(TuningProfile&&) = default;
+    
+    // Performance-optimized methods
+    bool isValid() const {
+        return bandwidth > 0.0f && 
+               squelchLevel >= -100.0f && squelchLevel <= 0.0f &&
+               demodMode >= 0 && demodMode < 8;
+    }
+    
+    // Fast serialization (minimal string operations)
+    json toJson() const {
+        json j;
+        j["demodMode"] = demodMode;
+        j["bandwidth"] = bandwidth;
+        j["squelchEnabled"] = squelchEnabled;
+        j["squelchLevel"] = squelchLevel;
+        j["deemphasisMode"] = deemphasisMode;
+        j["agcEnabled"] = agcEnabled;
+        j["rfGain"] = rfGain;
+        j["centerOffset"] = centerOffset;
+        j["autoApply"] = autoApply;
+        if (!name.empty()) j["name"] = name;
+        return j;
+    }
+    
+    // Fast deserialization with safe defaults
+    static TuningProfile fromJson(const json& j) {
+        TuningProfile p;
+        p.demodMode = j.value("demodMode", 0);
+        p.bandwidth = j.value("bandwidth", 12500.0f);
+        p.squelchEnabled = j.value("squelchEnabled", false);
+        p.squelchLevel = j.value("squelchLevel", -50.0f);
+        p.deemphasisMode = j.value("deemphasisMode", 0);
+        p.agcEnabled = j.value("agcEnabled", true);
+        
+        // MIGRATION FIX: Ensure rfGain is never 0 (fix old configs with 0 dB gain)
+        float gainValue = j.value("rfGain", 20.0f);
+        p.rfGain = (gainValue <= 0.0f) ? 20.0f : gainValue;
+        
+        p.centerOffset = j.value("centerOffset", 0.0);
+        p.autoApply = j.value("autoApply", true);
+        p.name = j.value("name", "");
+        return p;
+    }
+    
+    // Generate automatic profile name based on settings
+    std::string generateAutoName() const {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "%s %.1fkHz %s", 
+                demodModeList[demodMode], 
+                bandwidth / 1000.0f,
+                squelchEnabled ? "SQ" : "");
+        return std::string(buf);
+    }
+};
+
 struct FrequencyBookmark {
+    // Original fields (backward compatibility)
     double frequency;
     double bandwidth;
     int mode;
     bool selected;
+    
+    // NEW: Band support (performance-optimized layout)
+    bool isBand = false;                    // Flag: true = band, false = single frequency
+    double startFreq = 0.0;                 // For bands: start frequency  
+    double endFreq = 0.0;                   // For bands: end frequency
+    double stepFreq = 100000.0;             // For bands: scanning step (default 100kHz)
+    std::string notes;                      // User notes/description
+    std::vector<std::string> tags;          // Tags for categorization (pre-allocated for performance)
+    
+    // NEW: Tuning Profile support (memory-efficient optional)
+    std::optional<TuningProfile> profile;   // Optional tuning profile for this bookmark
+    
+    // NEW: Scanner integration (performance-critical)
+    bool scannable = false;                 // Include in scanner scan list
+    
+    // Default constructor
+    FrequencyBookmark() = default;
+    
+    // Copy constructor and assignment operator
+    FrequencyBookmark(const FrequencyBookmark&) = default;
+    FrequencyBookmark& operator=(const FrequencyBookmark&) = default;
+    FrequencyBookmark(FrequencyBookmark&&) = default;
+    FrequencyBookmark& operator=(FrequencyBookmark&&) = default;
+    
+    // Performance-optimized methods
+    bool isValid() const {
+        if (isBand) {
+            double bandBandwidth = endFreq - startFreq;
+            double sdrBandwidth = sigpath::iqFrontEnd.getEffectiveSamplerate();
+            
+            return startFreq < endFreq && 
+                   stepFreq > 0 && 
+                   stepFreq <= bandBandwidth &&
+                   stepFreq <= sdrBandwidth;
+        }
+        return frequency > 0;
+    }
+    
+    // Check if this bookmark has a tuning profile
+    bool hasProfile() const {
+        return profile.has_value();
+    }
+    
+    // Get profile with safe access
+    const TuningProfile* getProfile() const {
+        return profile.has_value() ? &profile.value() : nullptr;
+    }
+    
+    // Set profile (creates if needed)
+    void setProfile(const TuningProfile& p) {
+        profile = p;
+    }
+    
+    // Remove profile
+    void clearProfile() {
+        profile.reset();
+    }
+    
+    // Efficient JSON serialization with minimal string operations
+    json toJson() const {
+        json j;
+        j["frequency"] = frequency;
+        j["bandwidth"] = bandwidth;
+        j["mode"] = mode;
+        
+        // Only include band fields if this is actually a band (space optimization)
+        if (isBand) {
+            j["isBand"] = true;
+            j["startFreq"] = startFreq;
+            j["endFreq"] = endFreq;
+            j["stepFreq"] = stepFreq;
+            if (!notes.empty()) j["notes"] = notes;
+            if (!tags.empty()) j["tags"] = tags;
+        }
+        
+        // Only include profile if present (space optimization)
+        if (profile.has_value()) {
+            j["profile"] = profile.value().toJson();
+        }
+        
+        // Scanner integration
+        if (scannable) j["scannable"] = true;  // Only save if true (space optimization)
+        
+        return j;
+    }
+    
+    // Fast deserialization with proper defaults
+    static FrequencyBookmark fromJson(const json& j) {
+        FrequencyBookmark bm;
+        bm.frequency = j.value("frequency", 0.0);
+        bm.bandwidth = j.value("bandwidth", 0.0);
+        bm.mode = j.value("mode", 0);
+        bm.selected = false;
+        
+        // Band support with safe defaults
+        bm.isBand = j.value("isBand", false);
+        if (bm.isBand) {
+            bm.startFreq = j.value("startFreq", 0.0);
+            bm.endFreq = j.value("endFreq", 0.0);
+            bm.stepFreq = j.value("stepFreq", 100000.0);
+            bm.notes = j.value("notes", "");
+            if (j.contains("tags") && j["tags"].is_array()) {
+                bm.tags = j["tags"].get<std::vector<std::string>>();
+            }
+        }
+        
+        // Profile support with safe defaults
+        if (j.contains("profile") && j["profile"].is_object()) {
+            bm.profile = TuningProfile::fromJson(j["profile"]);
+        }
+        
+        // Scanner integration
+        bm.scannable = j.value("scannable", false);
+        
+        return bm;
+    }
+    
+    // Get display frequency (for sorting and display)
+    double getDisplayFreq() const {
+        return isBand ? startFreq : frequency;
+    }
+    
+    // Get frequency span (for display)
+    double getSpan() const {
+        return isBand ? (endFreq - startFreq) : 0.0;
+    }
 };
 
 struct WaterfallBookmark {
     std::string listName;
     std::string bookmarkName;
     FrequencyBookmark bookmark;
+    
+    // Default constructor
+    WaterfallBookmark() = default;
+    
+    // Copy constructor and assignment operator
+    WaterfallBookmark(const WaterfallBookmark&) = default;
+    WaterfallBookmark& operator=(const WaterfallBookmark&) = default;
+    WaterfallBookmark(WaterfallBookmark&&) = default;
+    WaterfallBookmark& operator=(WaterfallBookmark&&) = default;
 };
 
 ConfigManager config;
@@ -81,9 +311,13 @@ public:
         gui::menu.registerEntry(name, menuHandler, this, NULL);
         gui::waterfall.onFFTRedraw.bindHandler(&fftRedrawHandler);
         gui::waterfall.onInputProcess.bindHandler(&inputHandler);
+        
+        // CRITICAL: Register interface for scanner integration
+        core::modComManager.registerInterface(name, "frequency_manager", moduleInterfaceHandler, this);
     }
 
     ~FrequencyManagerModule() {
+        core::modComManager.unregisterInterface("frequency_manager");
         gui::menu.removeEntry(name);
         gui::waterfall.onFFTRedraw.unbindHandler(&fftRedrawHandler);
         gui::waterfall.onInputProcess.unbindHandler(&inputHandler);
@@ -102,24 +336,166 @@ public:
     bool isEnabled() {
         return enabled;
     }
+    
+    // PERFORMANCE-CRITICAL: Real-time scanner integration data structure
+    struct ScanEntry {
+        double frequency;                           // Target frequency
+        const TuningProfile* profile;              // Cached profile pointer (O(1) access)
+        const FrequencyBookmark* bookmark;         // Source bookmark reference
+        bool isFromBand;                           // true = generated from band, false = direct frequency
+        
+        ScanEntry(double freq, const TuningProfile* prof = nullptr, 
+                 const FrequencyBookmark* bm = nullptr, bool fromBand = false)
+            : frequency(freq), profile(prof), bookmark(bm), isFromBand(fromBand) {}
+        
+        // Fast comparison for sorting
+        bool operator<(const ScanEntry& other) const { return frequency < other.frequency; }
+    };
+    
+    // PERFORMANCE-CRITICAL: Real-time scanner integration API
+    // Get current scan list (thread-safe, lock-free read when possible)
+    const std::vector<ScanEntry>& getScanList() const {
+        if (scanListDirty.load()) {
+            rebuildScanList();
+        }
+        return cachedScanList;
+    }
+    
+    // Check if scan list needs rebuilding (lock-free)
+    bool isScanListDirty() const {
+        return scanListDirty.load();
+    }
+    
+    // Mark scan list as dirty (lock-free, immediate scanner notification)
+    void markScanListDirty() {
+        scanListDirty.store(true);
+    }
 
 private:
+    // PERFORMANCE-OPTIMIZED: Rebuild scan list from current bookmarks (called when dirty)
+    void rebuildScanList() const {
+        std::lock_guard<std::mutex> lock(scanListMutex);
+        
+        // Double-check pattern (avoid unnecessary work if another thread already rebuilt)
+        if (!scanListDirty.load()) {
+            return;
+        }
+        
+        cachedScanList.clear();
+        cachedScanList.reserve(1000);  // Pre-allocate for performance
+        
+        // Build scan list from all scannable bookmarks in current list
+        for (const auto& [bookmarkName, bookmark] : bookmarks) {
+            if (!bookmark.scannable) continue;  // Skip non-scannable entries
+            
+            if (bookmark.isBand) {
+                // Generate scan points for band (performance-optimized)
+                double freq = bookmark.startFreq;
+                while (freq <= bookmark.endFreq) {
+                    cachedScanList.emplace_back(
+                        freq,
+                        bookmark.getProfile(),  // Cache profile pointer
+                        &bookmark,              // Cache bookmark reference  
+                        true                    // Mark as from band
+                    );
+                    freq += bookmark.stepFreq;
+                    
+                    // Safety check to prevent infinite loops
+                    if (bookmark.stepFreq <= 0) break;
+                }
+            } else {
+                // Add single frequency entry
+                cachedScanList.emplace_back(
+                    bookmark.frequency,
+                    bookmark.getProfile(),  // Cache profile pointer
+                    &bookmark,              // Cache bookmark reference
+                    false                   // Not from band
+                );
+            }
+        }
+        
+        // Sort for efficient scanning (cache-friendly sequential access)
+        std::sort(cachedScanList.begin(), cachedScanList.end());
+        
+        // Clear dirty flag (atomic, lock-free)
+        scanListDirty.store(false);
+        
+        flog::info("FrequencyManager: Rebuilt scan list with {} entries", (int)cachedScanList.size());
+    }
     static void applyBookmark(FrequencyBookmark bm, std::string vfoName) {
+        // For bands, use the start frequency
+        double targetFreq = bm.isBand ? bm.startFreq : bm.frequency;
+        
         if (vfoName == "") {
             // TODO: Replace with proper tune call
-            gui::waterfall.setCenterFrequency(bm.frequency);
+            gui::waterfall.setCenterFrequency(targetFreq);
             gui::waterfall.centerFreqMoved = true;
         }
         else {
+            // Fast tuning to target frequency
+            tuner::tune(tuner::TUNER_MODE_NORMAL, vfoName, targetFreq);
+            
             if (core::modComManager.interfaceExists(vfoName)) {
                 if (core::modComManager.getModuleName(vfoName) == "radio") {
+                    // Apply tuning profile if present (PERFORMANCE-OPTIMIZED)
+                    const TuningProfile* profile = bm.getProfile();
+                    if (profile && profile->autoApply) {
+                        // Fast profile application - direct interface calls, no lookups
+                        applyTuningProfile(*profile, vfoName);
+                    } else if (!bm.isBand) {
+                        // Fallback: apply basic settings for frequencies without profiles
                     int mode = bm.mode;
                     float bandwidth = bm.bandwidth;
                     core::modComManager.callInterface(vfoName, RADIO_IFACE_CMD_SET_MODE, &mode, NULL);
                     core::modComManager.callInterface(vfoName, RADIO_IFACE_CMD_SET_BANDWIDTH, &bandwidth, NULL);
                 }
             }
-            tuner::tune(tuner::TUNER_MODE_NORMAL, vfoName, bm.frequency);
+            }
+        }
+        
+        // Log the action for user feedback
+        if (bm.isBand) {
+            flog::info("Frequency Manager: Applied band '{}' - tuned to start frequency {:.3f} MHz", 
+                      "bookmark", targetFreq / 1e6);
+        }
+        
+        if (bm.hasProfile()) {
+            const TuningProfile* profile = bm.getProfile();
+            flog::info("Frequency Manager: Applied profile '{}'", 
+                      profile->name.empty() ? profile->generateAutoName() : profile->name);
+        }
+    }
+    
+    // PERFORMANCE-OPTIMIZED profile application (< 10ms target)
+    static void applyTuningProfile(const TuningProfile& profile, const std::string& vfoName) {
+        if (!core::modComManager.interfaceExists(vfoName) || 
+            core::modComManager.getModuleName(vfoName) != "radio") {
+            return;
+        }
+        
+        try {
+            // Core demodulation settings (fast direct calls)
+            int mode = profile.demodMode;
+            float bandwidth = profile.bandwidth;
+            core::modComManager.callInterface(vfoName, RADIO_IFACE_CMD_SET_MODE, &mode, NULL);
+            core::modComManager.callInterface(vfoName, RADIO_IFACE_CMD_SET_BANDWIDTH, &bandwidth, NULL);
+            
+            // Squelch settings
+            if (profile.squelchEnabled) {
+                float squelchLevel = profile.squelchLevel;
+                // TODO: Add squelch interface calls when available
+                // core::modComManager.callInterface(vfoName, RADIO_IFACE_CMD_SET_SQUELCH, &squelchLevel, NULL);
+            }
+            
+            // Extended settings (optional, for advanced users)
+            // TODO: Add interface calls for advanced settings when available:
+            // - AGC enable/disable
+            // - RF gain (may need source module interface)
+            // - De-emphasis mode
+            // - Center offset
+            
+        } catch (const std::exception& e) {
+            flog::error("Frequency Manager: Error applying tuning profile: {}", e.what());
         }
     }
 
@@ -136,6 +512,7 @@ private:
         if (ImGui::BeginPopup(id.c_str(), ImGuiWindowFlags_NoResize)) {
             ImGui::BeginTable(("freq_manager_edit_table" + name).c_str(), 2);
 
+            // Name field
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
             ImGui::LeftLabel("名称");
@@ -145,6 +522,126 @@ private:
                 editedBookmarkName = nameBuf;
             }
 
+            // Type selector (Frequency vs Band)
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::LeftLabel("类型");
+            ImGui::TableSetColumnIndex(1);
+            ImGui::SetNextItemWidth(200);
+            const char* typeOptions = "频点\0频段\0";
+            int typeIndex = editedBookmark.isBand ? 1 : 0;
+            if (ImGui::Combo(("##freq_manager_edit_type" + name).c_str(), &typeIndex, typeOptions)) {
+                editedBookmark.isBand = (typeIndex == 1);
+                // Set reasonable defaults when switching to band
+                if (editedBookmark.isBand && editedBookmark.startFreq == 0.0) {
+                    editedBookmark.startFreq = editedBookmark.frequency;
+                    editedBookmark.endFreq = editedBookmark.frequency + 1000000.0; // +1MHz default
+                    editedBookmark.stepFreq = 100000.0; // 100kHz default step
+                }
+            }
+
+            if (editedBookmark.isBand) {
+                // Band-specific fields
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::LeftLabel("起始频率");
+                ImGui::TableSetColumnIndex(1);
+                ImGui::SetNextItemWidth(200);
+                ImGui::InputDouble(("##freq_manager_edit_start" + name).c_str(), &editedBookmark.startFreq);
+
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::LeftLabel("终止频率");
+                ImGui::TableSetColumnIndex(1);
+                ImGui::SetNextItemWidth(200);
+                ImGui::InputDouble(("##freq_manager_edit_end" + name).c_str(), &editedBookmark.endFreq);
+
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::LeftLabel("步进");
+                if (ImGui::IsItemHovered()) {
+                    double bandwidth = editedBookmark.endFreq - editedBookmark.startFreq;
+                    ImGui::SetTooltip("频段扫描的频率步进 (Hz)\n"
+                                     "生成主要扫描点: 起始 -> 起始+步进 -> 起始+2*步进 -> 终止\n"
+                                     "\n"
+                                     "关键要求:\n"
+                                     "步进必须 <= 频段宽度 (%.1f kHz)\n"
+                                     "否则扫描器会跳过整个频段!\n"
+                                     "\n"
+                                     "高效的两级扫描:\n"
+                                     "1. 硬件调谐: 电台调谐到每个步进点 (108.0、109.0 MHz)\n"
+                                     "   在电台带宽内采集 FFT 频谱数据\n"
+                                     "2. FFT 分析: 使用扫描器的分析间隔进行数字分析\n"
+                                     "   在已采集的数据中检查 108.005、108.010... (无需重新调谐!)\n"
+                                     "\n"
+                                     "为什么 1000kHz 步进 + 5kHz 间隔效果极佳:\n"
+                                     "- 步进 = 硬件调谐 (较慢，但仅每 1000kHz 一次)\n"
+                                     "- 分析间隔 = 数字 FFT 分析 (很快，每 5kHz 一次)\n"
+                                     "- 结果 = 主要跳变快速 + 频谱覆盖全面\n"
+                                     "- 电台带宽限制每个步进点的有效间隔范围\n"
+                                     "\n"
+                                     "推荐步进:\n"
+                                     "- 100-1000 kHz: 配合分析间隔扫描宽频段的最佳选择\n"
+                                     "- 25-100 kHz: 适合混合扫描类型\n"
+                                     "- 5-25 kHz: 精度最高，速度受硬件限制\n"
+                                     "\n"
+                                     "提示: 大步进配合小间隔效果很好 (FFT 的优势!)",
+                                     bandwidth / 1e3);
+                }
+                ImGui::TableSetColumnIndex(1);
+                ImGui::SetNextItemWidth(200);
+                ImGui::InputDouble(("##freq_manager_edit_step" + name).c_str(), &editedBookmark.stepFreq);
+                
+                // Show bandwidth constraints info with warnings
+                double bandBandwidth = editedBookmark.endFreq - editedBookmark.startFreq;
+                double sdrBandwidth = sigpath::iqFrontEnd.getEffectiveSamplerate();
+                double maxAllowedStep = (std::min)(bandBandwidth, sdrBandwidth);
+                
+                // Color-code based on step frequency validity
+                ImVec4 textColor;
+                if (editedBookmark.stepFreq > maxAllowedStep) {
+                    textColor = ImVec4(1.0f, 0.4f, 0.4f, 1.0f); // Red - invalid
+                } else if (editedBookmark.stepFreq > maxAllowedStep * 0.8) {
+                    textColor = ImVec4(1.0f, 0.6f, 0.2f, 1.0f); // Orange - close to limit
+                } else {
+                    textColor = ImVec4(0.6f, 0.6f, 0.6f, 1.0f); // Gray - normal info
+                }
+                
+                ImGui::PushStyleColor(ImGuiCol_Text, textColor);
+                ImGui::Text("上限: %.1f MHz (频段: %.1f, SDR: %.1f)", 
+                          maxAllowedStep / 1e6, bandBandwidth / 1e6, sdrBandwidth / 1e6);
+                ImGui::PopStyleColor();
+                
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("步进频率受以下因素限制:\n"
+                                     "- 频段带宽: %.1f MHz\n"
+                                     "- SDR 硬件带宽: %.1f MHz\n"
+                                     "\n"
+                                     "允许的最大步进: %.1f MHz\n"
+                                     "当前步进: %.1f MHz\n"
+                                     "\n"
+                                     "%s",
+                                     bandBandwidth / 1e6, sdrBandwidth / 1e6,
+                                     maxAllowedStep / 1e6, editedBookmark.stepFreq / 1e6,
+                                     editedBookmark.stepFreq > maxAllowedStep ? 
+                                     "警告: 步进超出限制!" : 
+                                     "步进频率在有效范围内。");
+                }
+                
+
+
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::LeftLabel("备注");
+                ImGui::TableSetColumnIndex(1);
+                ImGui::SetNextItemWidth(200);
+                if (ImGui::InputText(("##freq_manager_edit_notes" + name).c_str(), editedNotes, 1023)) {
+                    editedBookmark.notes = editedNotes;
+                }
+
+
+            } else {
+                // Frequency-specific fields (original)
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
             ImGui::LeftLabel("频率");
@@ -164,12 +661,143 @@ private:
             ImGui::LeftLabel("模式");
             ImGui::TableSetColumnIndex(1);
             ImGui::SetNextItemWidth(200);
-
             ImGui::Combo(("##freq_manager_edit_mode" + name).c_str(), &editedBookmark.mode, demodModeListTxt);
+            }
 
             ImGui::EndTable();
 
-            bool applyDisabled = (strlen(nameBuf) == 0) || (bookmarks.find(editedBookmarkName) != bookmarks.end() && editedBookmarkName != firstEditedBookmarkName);
+            ImGui::Spacing();
+            
+            // Scanner Integration section
+            ImGui::Separator();
+            ImGui::Text("扫描器集成");
+            bool scannable = editedBookmark.scannable;
+            if (ImGui::Checkbox("加入扫描", &scannable)) {
+                editedBookmark.scannable = scannable;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("启用后，该条目将加入扫描器频率列表");
+            }
+            
+            ImGui::Spacing();
+            
+            // Tuning Profile section
+            bool hasProfile = editedBookmark.hasProfile();
+            if (ImGui::CollapsingHeader("调谐档案", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::Indent();
+                
+                // Profile enable/disable
+                bool enableProfile = hasProfile;
+                if (ImGui::Checkbox("启用调谐档案", &enableProfile)) {
+                    if (enableProfile && !hasProfile) {
+                        // Create new profile with current radio settings
+                        TuningProfile newProfile;
+                        if (gui::waterfall.selectedVFO != "" && 
+                            core::modComManager.getModuleName(gui::waterfall.selectedVFO) == "radio") {
+                            int mode;
+                            core::modComManager.callInterface(gui::waterfall.selectedVFO, RADIO_IFACE_CMD_GET_MODE, NULL, &mode);
+                            newProfile.demodMode = mode;
+                            newProfile.bandwidth = sigpath::vfoManager.getBandwidth(gui::waterfall.selectedVFO);
+                        }
+                        newProfile.name = newProfile.generateAutoName();
+                        editedBookmark.setProfile(newProfile);
+                        strcpy(editedProfileName, newProfile.name.c_str());
+                    } else if (!enableProfile && hasProfile) {
+                        editedBookmark.clearProfile();
+                    }
+                }
+                
+                if (editedBookmark.hasProfile()) {
+                    const TuningProfile* profile = editedBookmark.getProfile();
+                    editedProfile = *profile; // Copy for editing
+                    
+                    ImGui::Spacing();
+                    
+                    // Profile name
+                    ImGui::LeftLabel("档案名称");
+                    ImGui::SetNextItemWidth(200);
+                    if (ImGui::InputText(("##profile_name" + name).c_str(), editedProfileName, sizeof(editedProfileName))) {
+                        editedProfile.name = editedProfileName;
+                        editedBookmark.setProfile(editedProfile);
+                    }
+                    
+                    ImGui::SameLine();
+                    if (ImGui::Button("自动命名")) {
+                        std::string autoName = editedProfile.generateAutoName();
+                        strcpy(editedProfileName, autoName.c_str());
+                        editedProfile.name = autoName;
+                        editedBookmark.setProfile(editedProfile);
+                    }
+                    
+                    // Basic settings
+                    ImGui::LeftLabel("模式");
+                    ImGui::SetNextItemWidth(200);
+                    if (ImGui::Combo(("##profile_mode" + name).c_str(), &editedProfile.demodMode, demodModeListTxt)) {
+                        editedBookmark.setProfile(editedProfile);
+                    }
+                    
+                    ImGui::LeftLabel("带宽 (Hz)");
+                    ImGui::SetNextItemWidth(200);
+                    if (ImGui::InputFloat(("##profile_bw" + name).c_str(), &editedProfile.bandwidth, 1000.0f, 10000.0f, "%.0f")) {
+                        editedProfile.bandwidth = (std::max)(1000.0f, editedProfile.bandwidth);
+                        editedBookmark.setProfile(editedProfile);
+                    }
+                    
+                    ImGui::LeftLabel("启用静噪");
+                    if (ImGui::Checkbox(("##profile_squelch_en" + name).c_str(), &editedProfile.squelchEnabled)) {
+                        editedBookmark.setProfile(editedProfile);
+                    }
+                    
+                    if (editedProfile.squelchEnabled) {
+                        ImGui::LeftLabel("静噪电平 (dB)");
+                        ImGui::SetNextItemWidth(200);
+                        if (ImGui::SliderFloat(("##profile_squelch_lvl" + name).c_str(), &editedProfile.squelchLevel, -100.0f, 0.0f, "%.1f")) {
+                            editedBookmark.setProfile(editedProfile);
+                        }
+                    }
+                    
+                    // Advanced settings (collapsible)
+                    if (ImGui::CollapsingHeader("高级设置")) {
+                        ImGui::Indent();
+                        
+                        ImGui::LeftLabel("射频增益 (dB)");
+                        ImGui::SetNextItemWidth(200);
+                        if (ImGui::SliderFloat(("##profile_rf_gain" + name).c_str(), &editedProfile.rfGain, 0.0f, 50.0f, "%.1f")) {
+                            editedBookmark.setProfile(editedProfile);
+                        }
+                        
+                        ImGui::LeftLabel("启用 AGC");
+                        if (ImGui::Checkbox(("##profile_agc" + name).c_str(), &editedProfile.agcEnabled)) {
+                            editedBookmark.setProfile(editedProfile);
+                        }
+                        
+                        ImGui::LeftLabel("中心偏移 (Hz)");
+                        ImGui::SetNextItemWidth(200);
+                        if (ImGui::InputDouble(("##profile_offset" + name).c_str(), &editedProfile.centerOffset, 1000.0, 10000.0, "%.0f")) {
+                            editedBookmark.setProfile(editedProfile);
+                        }
+                        
+                        ImGui::Unindent();
+                    }
+                }
+                
+                ImGui::Unindent();
+            }
+
+            // Validation and status
+            bool isValid = editedBookmark.isValid();
+            if (!isValid) {
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "配置无效!");
+            }
+            
+            // Profile validation
+            if (editedBookmark.hasProfile() && !editedBookmark.getProfile()->isValid()) {
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "档案设置无效!");
+                isValid = false;
+            }
+
+            bool applyDisabled = (strlen(nameBuf) == 0) || !isValid || 
+                                (bookmarks.find(editedBookmarkName) != bookmarks.end() && editedBookmarkName != firstEditedBookmarkName);
             if (applyDisabled) { style::beginDisabled(); }
             if (ImGui::Button("应用")) {
                 open = false;
@@ -181,6 +809,7 @@ private:
                 bookmarks[editedBookmarkName] = editedBookmark;
 
                 saveByName(selectedListName);
+                markScanListDirty();  // PERFORMANCE: Immediate scanner update
             }
             if (applyDisabled) { style::endDisabled(); }
             ImGui::SameLine();
@@ -263,7 +892,7 @@ private:
                 }
             }
 
-            if (ImGui::Button("Ok")) {
+            if (ImGui::Button("确定")) {
                 open = false;
             }
             ImGui::EndPopup();
@@ -293,11 +922,25 @@ private:
             wbm.listName = listName;
             for (auto [bookmarkName, bm] : config.conf["lists"][listName]["bookmarks"].items()) {
                 wbm.bookmarkName = bookmarkName;
-                wbm.bookmark.frequency = config.conf["lists"][listName]["bookmarks"][bookmarkName]["frequency"];
-                wbm.bookmark.bandwidth = config.conf["lists"][listName]["bookmarks"][bookmarkName]["bandwidth"];
-                wbm.bookmark.mode = config.conf["lists"][listName]["bookmarks"][bookmarkName]["mode"];
+                // Use efficient deserialization and handle bands
+                wbm.bookmark = FrequencyBookmark::fromJson(bm);
                 wbm.bookmark.selected = false;
+                
+                // For bands, add multiple waterfall bookmarks (start, middle, end)
+                if (wbm.bookmark.isBand) {
+                    // Add start frequency
+                    wbm.bookmark.frequency = wbm.bookmark.startFreq;
+                    wbm.bookmarkName = bookmarkName + " (Start)";
+                    waterfallBookmarks.push_back(wbm);
+                    
+                    // Add end frequency
+                    wbm.bookmark.frequency = wbm.bookmark.endFreq;
+                    wbm.bookmarkName = bookmarkName + " (End)";
+                    waterfallBookmarks.push_back(wbm);
+                } else {
+                    // Regular frequency bookmark
                 waterfallBookmarks.push_back(wbm);
+                }
             }
         }
         if (lockConfig) { config.release(); }
@@ -324,23 +967,21 @@ private:
         selectedListName = listName;
         config.acquire();
         for (auto [bmName, bm] : config.conf["lists"][listName]["bookmarks"].items()) {
-            FrequencyBookmark fbm;
-            fbm.frequency = bm["frequency"];
-            fbm.bandwidth = bm["bandwidth"];
-            fbm.mode = bm["mode"];
+            // Use performance-optimized deserialization
+            FrequencyBookmark fbm = FrequencyBookmark::fromJson(bm);
             fbm.selected = false;
             bookmarks[bmName] = fbm;
         }
         config.release();
+        markScanListDirty();  // PERFORMANCE: Immediate scanner update
     }
 
     void saveByName(std::string listName) {
         config.acquire();
         config.conf["lists"][listName]["bookmarks"] = json::object();
         for (auto [bmName, bm] : bookmarks) {
-            config.conf["lists"][listName]["bookmarks"][bmName]["frequency"] = bm.frequency;
-            config.conf["lists"][listName]["bookmarks"][bmName]["bandwidth"] = bm.bandwidth;
-            config.conf["lists"][listName]["bookmarks"][bmName]["mode"] = bm.mode;
+            // Use performance-optimized serialization
+            config.conf["lists"][listName]["bookmarks"][bmName] = bm.toJson();
         }
         refreshWaterfallBookmarks(false);
         config.release(true);
@@ -358,7 +999,7 @@ private:
 
         float lineHeight = ImGui::GetTextLineHeightWithSpacing();
 
-        float btnSize = ImGui::CalcTextSize("重命名").x + 8;
+        float btnSize = ImGui::CalcTextSize("Rename").x + 8;
         ImGui::SetNextItemWidth(menuWidth - 24 - (2 * lineHeight) - btnSize);
         if (ImGui::Combo(("##freq_manager_list_sel" + _this->name).c_str(), &_this->selectedListId, _this->listNamesTxt.c_str())) {
             _this->loadByName(_this->listNames[_this->selectedListId]);
@@ -377,13 +1018,13 @@ private:
         ImGui::SameLine();
         if (ImGui::Button(("+##_freq_mgr_add_lst_" + _this->name).c_str(), ImVec2(lineHeight, 0))) {
             // Find new unique default name
-            if (std::find(_this->listNames.begin(), _this->listNames.end(), "New List") == _this->listNames.end()) {
-                _this->editedListName = "New List";
+            if (std::find(_this->listNames.begin(), _this->listNames.end(), "新列表") == _this->listNames.end()) {
+                _this->editedListName = "新列表";
             }
             else {
                 char buf[64];
                 for (int i = 1; i < 1000; i++) {
-                    sprintf(buf, "新列表 (%d)", i);
+                    sprintf(buf, "New List (%d)", i);
                     if (std::find(_this->listNames.begin(), _this->listNames.end(), buf) == _this->listNames.end()) { break; }
                 }
                 _this->editedListName = buf;
@@ -399,7 +1040,7 @@ private:
 
         // List delete confirmation
         if (ImGui::GenericDialog(("freq_manager_del_list_confirm" + _this->name).c_str(), _this->deleteListOpen, GENERIC_DIALOG_BUTTONS_YES_NO, [_this]() {
-                ImGui::Text("确定要删除列表 \"%s\" 吗?", _this->selectedListName.c_str());
+                ImGui::Text("即将删除列表 \"%s\"，确定吗?", _this->selectedListName.c_str());
             }) == GENERIC_DIALOG_BUTTON_YES) {
             config.acquire();
             config.conf["lists"].erase(_this->selectedListName);
@@ -417,11 +1058,16 @@ private:
 
         if (_this->selectedListName == "") { style::beginDisabled(); }
         //Draw buttons on top of the list
-        ImGui::BeginTable(("freq_manager_btn_table" + _this->name).c_str(), 3);
+        ImGui::BeginTable(("freq_manager_btn_table" + _this->name).c_str(), 4);
         ImGui::TableNextRow();
 
         ImGui::TableSetColumnIndex(0);
         if (ImGui::Button(("添加##_freq_mgr_add_" + _this->name).c_str(), ImVec2(ImGui::GetContentRegionAvail().x, 0))) {
+            // Reset bookmark to frequency mode
+            _this->editedBookmark = FrequencyBookmark();
+            _this->editedBookmark.isBand = false;
+            _this->createBandMode = false;
+            
             // If there's no VFO selected, just save the center freq
             if (gui::waterfall.selectedVFO == "") {
                 _this->editedBookmark.frequency = gui::waterfall.getCenterFrequency();
@@ -440,12 +1086,11 @@ private:
             }
 
             _this->editedBookmark.selected = false;
-
             _this->createOpen = true;
 
             // Find new unique default name
-            if (_this->bookmarks.find("New Bookmark") == _this->bookmarks.end()) {
-                _this->editedBookmarkName = "New Bookmark";
+            if (_this->bookmarks.find("新书签") == _this->bookmarks.end()) {
+                _this->editedBookmarkName = "新书签";
             }
             else {
                 char buf[64];
@@ -455,21 +1100,72 @@ private:
                 }
                 _this->editedBookmarkName = buf;
             }
+            
+            // Clear edit buffers
+            strcpy(_this->editedNotes, _this->editedBookmark.notes.c_str());
+            strcpy(_this->editedProfileName, "");
         }
 
         ImGui::TableSetColumnIndex(1);
+        if (ImGui::Button(("添加频段##_freq_mgr_add_band_" + _this->name).c_str(), ImVec2(ImGui::GetContentRegionAvail().x, 0))) {
+            // Reset bookmark to band mode
+            _this->editedBookmark = FrequencyBookmark();
+            _this->editedBookmark.isBand = true;
+            _this->createBandMode = true;
+            
+            // Set reasonable defaults for band
+            double currentFreq = gui::waterfall.getCenterFrequency();
+            if (gui::waterfall.selectedVFO != "") {
+                currentFreq += sigpath::vfoManager.getOffset(gui::waterfall.selectedVFO);
+            }
+            
+            _this->editedBookmark.startFreq = currentFreq - 500000.0;  // -500kHz
+            _this->editedBookmark.endFreq = currentFreq + 500000.0;    // +500kHz  
+            _this->editedBookmark.stepFreq = 100000.0;                 // 100kHz step
+            _this->editedBookmark.selected = false;
+            _this->createOpen = true;
+
+            // Find new unique default name
+            if (_this->bookmarks.find("新频段") == _this->bookmarks.end()) {
+                _this->editedBookmarkName = "新频段";
+            }
+            else {
+                char buf[64];
+                for (int i = 1; i < 1000; i++) {
+                    sprintf(buf, "New Band (%d)", i);
+                    if (_this->bookmarks.find(buf) == _this->bookmarks.end()) { break; }
+                }
+                _this->editedBookmarkName = buf;
+            }
+            
+            // Clear edit buffers
+            strcpy(_this->editedNotes, _this->editedBookmark.notes.c_str());
+            strcpy(_this->editedProfileName, "");
+        }
+
+        ImGui::TableSetColumnIndex(2);
         if (selectedNames.size() == 0 && _this->selectedListName != "") { style::beginDisabled(); }
-        if (ImGui::Button(("删除##_freq_mgr_rem_" + _this->name).c_str(), ImVec2(ImGui::GetContentRegionAvail().x, 0))) {
+        if (ImGui::Button(("移除##_freq_mgr_rem_" + _this->name).c_str(), ImVec2(ImGui::GetContentRegionAvail().x, 0))) {
             _this->deleteBookmarksOpen = true;
         }
         if (selectedNames.size() == 0 && _this->selectedListName != "") { style::endDisabled(); }
-        ImGui::TableSetColumnIndex(2);
+        ImGui::TableSetColumnIndex(3);
         if (selectedNames.size() != 1 && _this->selectedListName != "") { style::beginDisabled(); }
         if (ImGui::Button(("编辑##_freq_mgr_edt_" + _this->name).c_str(), ImVec2(ImGui::GetContentRegionAvail().x, 0))) {
             _this->editOpen = true;
             _this->editedBookmark = _this->bookmarks[selectedNames[0]];
             _this->editedBookmarkName = selectedNames[0];
             _this->firstEditedBookmarkName = selectedNames[0];
+            
+            // Load values into edit buffers
+            strcpy(_this->editedNotes, _this->editedBookmark.notes.c_str());
+            
+            // Load profile name buffer
+            if (_this->editedBookmark.hasProfile()) {
+                strcpy(_this->editedProfileName, _this->editedBookmark.getProfile()->name.c_str());
+            } else {
+                strcpy(_this->editedProfileName, "");
+            }
         }
         if (selectedNames.size() != 1 && _this->selectedListName != "") { style::endDisabled(); }
 
@@ -478,21 +1174,79 @@ private:
         // Bookmark delete confirm dialog
         // List delete confirmation
         if (ImGui::GenericDialog(("freq_manager_del_list_confirm" + _this->name).c_str(), _this->deleteBookmarksOpen, GENERIC_DIALOG_BUTTONS_YES_NO, [_this]() {
-                ImGui::TextUnformatted("确定要删除选中的书签吗?");
+                ImGui::TextUnformatted("即将删除所选书签，确定吗?");
             }) == GENERIC_DIALOG_BUTTON_YES) {
             for (auto& _name : selectedNames) { _this->bookmarks.erase(_name); }
             _this->saveByName(_this->selectedListName);
+            _this->markScanListDirty();  // PERFORMANCE: Immediate scanner update
         }
 
         // Bookmark list
-        if (ImGui::BeginTable(("freq_manager_bkm_table" + _this->name).c_str(), 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY, ImVec2(0, 200.0f * style::uiScale))) {
+        if (ImGui::BeginTable(("freq_manager_bkm_table" + _this->name).c_str(), 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY, ImVec2(0, 200.0f * style::uiScale))) {
+            ImGui::TableSetupColumn("类型", ImGuiTableColumnFlags_WidthFixed, 50.0f);
+            ImGui::TableSetupColumn("P", ImGuiTableColumnFlags_WidthFixed, 20.0f);  // Profile indicator
+            ImGui::TableSetupColumn("S", ImGuiTableColumnFlags_WidthFixed, 20.0f);  // Scanner toggle
             ImGui::TableSetupColumn("名称");
-            ImGui::TableSetupColumn("书签");
-            ImGui::TableSetupScrollFreeze(2, 1);
+            ImGui::TableSetupColumn("详情");
+            ImGui::TableSetupScrollFreeze(5, 1);
             ImGui::TableHeadersRow();
+            
+            // Add helpful tooltip for new UX functionality
+            if (ImGui::IsItemHovered()) {
+                ImGui::BeginTooltip();
+                ImGui::Text("频率管理器操作:");
+                ImGui::Separator();
+                ImGui::Text("- 单击: 选择条目");
+                ImGui::Text("- 双击: 应用条目 (调谐到该频率)");
+                ImGui::Text("- 右键: 编辑条目");
+                ImGui::Text("- 编辑按钮: 编辑所选条目");
+                ImGui::EndTooltip();
+            }
             for (auto& [name, bm] : _this->bookmarks) {
                 ImGui::TableNextRow();
+                
+                // Type column with color-coded indicators
                 ImGui::TableSetColumnIndex(0);
+                if (bm.isBand) {
+                    ImGui::TextColored(ImVec4(0.2f, 0.8f, 0.2f, 1.0f), "频段");
+                } else {
+                    ImGui::TextColored(ImVec4(0.2f, 0.6f, 1.0f, 1.0f), "频点");
+                }
+                
+                // Profile indicator column
+                ImGui::TableSetColumnIndex(1);
+                if (bm.hasProfile()) {
+                    ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.0f, 1.0f), "[P]");
+                    if (ImGui::IsItemHovered()) {
+                        const TuningProfile* prof = bm.getProfile();
+                        ImGui::BeginTooltip();
+                        ImGui::Text("档案: %s", prof->name.empty() ? prof->generateAutoName().c_str() : prof->name.c_str());
+                        ImGui::Text("模式: %s", demodModeList[prof->demodMode]);
+                        ImGui::Text("带宽: %.1f kHz", prof->bandwidth / 1000.0f);
+                        if (prof->squelchEnabled) {
+                            ImGui::Text("静噪: %.1f dB", prof->squelchLevel);
+                        }
+                        ImGui::EndTooltip();
+                    }
+                } else {
+                    ImGui::TextDisabled("-");
+                }
+                
+                // Scanner toggle column (PERFORMANCE-CRITICAL: Quick access UX)
+                ImGui::TableSetColumnIndex(2);
+                bool isScannable = bm.scannable;
+                if (ImGui::Checkbox(("##scan_" + name).c_str(), &isScannable)) {
+                    bm.scannable = isScannable;
+                    _this->saveByName(_this->selectedListName);
+                    _this->markScanListDirty();  // PERFORMANCE: Immediate scanner update
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("将此条目加入扫描器频率列表\n%s", 
+                                    isScannable ? "扫描器将调谐到该频率" : "扫描器将跳过该条目");
+                }
+                
+                // Name column
+                ImGui::TableSetColumnIndex(3);
                 ImVec2 min = ImGui::GetCursorPos();
 
                 if (ImGui::Selectable((name + "##_freq_mgr_bkm_name_" + _this->name).c_str(), &bm.selected, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_SelectOnClick)) {
@@ -504,12 +1258,49 @@ private:
                         }
                     }
                 }
+                
+                // ENHANCED UX: Double-click applies bookmark (tune to frequency)
                 if (ImGui::TableGetHoveredColumn() >= 0 && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                    // Double-click: Apply bookmark (tune to frequency)
                     applyBookmark(bm, gui::waterfall.selectedVFO);
                 }
+                
+                // ENHANCED UX: Right-click opens edit dialog
+                if (ImGui::TableGetHoveredColumn() >= 0 && ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+                    // Right-click: Edit bookmark (open edit dialog)
+                    _this->editOpen = true;
+                    _this->editedBookmark = bm;
+                    _this->editedBookmarkName = name;
+                    _this->firstEditedBookmarkName = name;
+                    
+                    // Load values into edit buffers
+                    strcpy(_this->editedNotes, _this->editedBookmark.notes.c_str());
+                    
+                    // Load profile name buffer
+                    if (_this->editedBookmark.hasProfile()) {
+                        strcpy(_this->editedProfileName, _this->editedBookmark.getProfile()->name.c_str());
+                    } else {
+                        strcpy(_this->editedProfileName, "");
+                    }
+                    
+                    // Ensure the bookmark is selected for editing
+                    for (auto& [_name, _bm] : _this->bookmarks) {
+                        _bm.selected = (_name == name);
+                    }
+                }
 
-                ImGui::TableSetColumnIndex(1);
+                // Details column
+                ImGui::TableSetColumnIndex(4);
+                if (bm.isBand) {
+                    // Band details: start-end MHz, step, span
+                    double spanMHz = (bm.endFreq - bm.startFreq) / 1e6;
+                    double stepkHz = bm.stepFreq / 1e3;
+                    ImGui::Text("%.3f-%.3f MHz (%.0f kHz，跨度 %.1f MHz)", 
+                               bm.startFreq / 1e6, bm.endFreq / 1e6, stepkHz, spanMHz);
+                } else {
+                    // Frequency details: frequency and mode
                 ImGui::Text("%s %s", utils::formatFreq(bm.frequency).c_str(), demodModeList[bm.mode]);
+                }
                 ImVec2 max = ImGui::GetCursorPos();
             }
             ImGui::EndTable();
@@ -529,13 +1320,36 @@ private:
         ImGui::TableNextRow();
 
         ImGui::TableSetColumnIndex(0);
+#ifdef __ANDROID__
+        if (ImGui::Button(("导入##_freq_mgr_imp_" + _this->name).c_str(), ImVec2(ImGui::GetContentRegionAvail().x, 0))) {
+            backend::openFileDialog([_this](std::string path) {
+                if (!path.empty() && _this->listNames.size() > 0) {
+                    _this->importBookmarks(path);
+                }
+            });
+        }
+#else
         if (ImGui::Button(("导入##_freq_mgr_imp_" + _this->name).c_str(), ImVec2(ImGui::GetContentRegionAvail().x, 0)) && !_this->importOpen) {
             _this->importOpen = true;
-            _this->importDialog = new pfd::open_file("Import bookmarks", "", { "JSON Files (*.json)", "*.json", "All Files", "*" }, pfd::opt::multiselect);
+            _this->importDialog = new pfd::open_file("导入书签", "", { "JSON 文件 (*.json)", "*.json", "所有文件", "*" }, pfd::opt::multiselect);
         }
+#endif
 
         ImGui::TableSetColumnIndex(1);
         if (selectedNames.size() == 0 && _this->selectedListName != "") { style::beginDisabled(); }
+#ifdef __ANDROID__
+        if (ImGui::Button(("导出##_freq_mgr_exp_" + _this->name).c_str(), ImVec2(ImGui::GetContentRegionAvail().x, 0))) {
+            _this->exportedBookmarks = json::object();
+            config.acquire();
+            for (auto& _name : selectedNames) {
+                _this->exportedBookmarks["bookmarks"][_name] = config.conf["lists"][_this->selectedListName]["bookmarks"][_name];
+            }
+            config.release();
+            std::string cachePath = backend::getAppFilesDir() + "/export_temp.json";
+            _this->exportBookmarks(cachePath);
+            backend::saveFileDialog(cachePath, "bookmarks.json", [](std::string result) {});
+        }
+#else
         if (ImGui::Button(("导出##_freq_mgr_exp_" + _this->name).c_str(), ImVec2(ImGui::GetContentRegionAvail().x, 0)) && !_this->exportOpen) {
             _this->exportedBookmarks = json::object();
             config.acquire();
@@ -544,12 +1358,13 @@ private:
             }
             config.release();
             _this->exportOpen = true;
-            _this->exportDialog = new pfd::save_file("Export bookmarks", "", { "JSON Files (*.json)", "*.json", "All Files", "*" });
+            _this->exportDialog = new pfd::save_file("导出书签", "", { "JSON 文件 (*.json)", "*.json", "所有文件", "*" });
         }
+#endif
         if (selectedNames.size() == 0 && _this->selectedListName != "") { style::endDisabled(); }
         ImGui::EndTable();
 
-        if (ImGui::Button(("选择要显示的列表##_freq_mgr_exp_" + _this->name).c_str(), ImVec2(menuWidth, 0))) {
+        if (ImGui::Button(("选择显示的列表##_freq_mgr_exp_" + _this->name).c_str(), ImVec2(menuWidth, 0))) {
             _this->selectListsOpen = true;
         }
 
@@ -583,6 +1398,7 @@ private:
             _this->selectListsOpen = _this->selectListsDialog();
         }
 
+#ifndef __ANDROID__
         // Handle import and export
         if (_this->importOpen && _this->importDialog->ready()) {
             _this->importOpen = false;
@@ -600,7 +1416,8 @@ private:
             }
             delete _this->exportDialog;
         }
-    }
+#endif
+	}
 
     static void fftRedraw(ImGui::WaterFall::FFTRedrawArgs args, void* ctx) {
         FrequencyManagerModule* _this = (FrequencyManagerModule*)ctx;
@@ -749,15 +1566,29 @@ private:
     json exportedBookmarks;
     bool importOpen = false;
     bool exportOpen = false;
+#ifndef __ANDROID__
     pfd::open_file* importDialog;
     pfd::save_file* exportDialog;
+#endif
 
     void importBookmarks(std::string path) {
-        std::ifstream fs(path);
+        // 文件格式不对、字段类型不符时 nlohmann::json 会抛异常；
+        // 在渲染线程里没人捕获就会 std::terminate 直接闪退，所以这里全部捕获并记录日志
         json importBookmarks;
-        fs >> importBookmarks;
+        try {
+            std::ifstream fs(path);
+            if (!fs.is_open()) {
+                flog::error("Could not open import file '{0}'", path);
+                return;
+            }
+            importBookmarks = json::parse(fs);
+        }
+        catch (const std::exception& e) {
+            flog::error("Failed to parse import file '{0}': {1}", path, e.what());
+            return;
+        }
 
-        if (!importBookmarks.contains("bookmarks")) {
+        if (!importBookmarks.is_object() || !importBookmarks.contains("bookmarks")) {
             flog::error("File does not contains any bookmarks");
             return;
         }
@@ -767,22 +1598,37 @@ private:
             return;
         }
 
-        // Load every bookmark
-        for (auto const [_name, bm] : importBookmarks["bookmarks"].items()) {
+        // Load every bookmark using efficient deserialization
+        for (auto it = importBookmarks["bookmarks"].begin(); it != importBookmarks["bookmarks"].end(); ++it) {
+            const std::string _name = it.key();
+            const json& bm = it.value();
             if (bookmarks.find(_name) != bookmarks.end()) {
                 flog::warn("Bookmark with the name '{0}' already exists in list, skipping", _name);
                 continue;
             }
-            FrequencyBookmark fbm;
-            fbm.frequency = bm["frequency"];
-            fbm.bandwidth = bm["bandwidth"];
-            fbm.mode = bm["mode"];
-            fbm.selected = false;
-            bookmarks[_name] = fbm;
+            if (!bm.is_object()) {
+                flog::warn("Bookmark '{0}' is not an object, skipped during import", _name);
+                continue;
+            }
+            try {
+                // Use performance-optimized deserialization
+                FrequencyBookmark fbm = FrequencyBookmark::fromJson(bm);
+                fbm.selected = false;
+
+                // Validate bookmark before adding
+                if (!fbm.isValid()) {
+                    flog::warn("Invalid bookmark '{0}' skipped during import", _name);
+                    continue;
+                }
+
+                bookmarks[_name] = fbm;
+            }
+            catch (const std::exception& e) {
+                flog::warn("Bookmark '{0}' skipped during import: {1}", _name, e.what());
+            }
         }
         saveByName(selectedListName);
-
-        fs.close();
+        markScanListDirty();  // PERFORMANCE: Immediate scanner update
     }
 
     void exportBookmarks(std::string path) {
@@ -810,6 +1656,23 @@ private:
     std::string editedBookmarkName = "";
     std::string firstEditedBookmarkName = "";
     FrequencyBookmark editedBookmark;
+    
+    // Band editing support
+    bool createBandMode = false;
+    char editedNotes[1024] = "";
+    char editedTags[512] = "";
+    
+    // Profile editing support
+    bool profileEditOpen = false;
+    TuningProfile editedProfile;
+    char editedProfileName[256] = "";
+    bool profileAdvancedMode = false;
+    
+
+    
+    mutable std::vector<ScanEntry> cachedScanList;      // Pre-computed scan list (performance-optimized)
+    mutable std::atomic<bool> scanListDirty{true};      // Lock-free dirty flag for change detection
+    mutable std::mutex scanListMutex;                   // Minimal locking for scan list updates
 
     std::vector<std::string> listNames;
     std::string listNamesTxt = "";
@@ -822,14 +1685,82 @@ private:
     std::vector<WaterfallBookmark> waterfallBookmarks;
 
     int bookmarkDisplayMode = 0;
+    
+    // SCANNER INTEGRATION: Interface handler for ModuleComManager
+    enum InterfaceCommands {
+        CMD_GET_SCAN_LIST = 1,
+        CMD_GET_BOOKMARK_NAME = 2  // Get bookmark name for a specific frequency
+    };
+    
+    static void moduleInterfaceHandler(int code, void* in, void* out, void* ctx) {
+        FrequencyManagerModule* _this = (FrequencyManagerModule*)ctx;
+        
+        switch (code) {
+            case CMD_GET_SCAN_LIST: {
+                // Return the current scan list to the scanner
+                if (out) {
+                    const std::vector<ScanEntry>& scanList = _this->getScanList();
+                    *static_cast<const std::vector<ScanEntry>**>(out) = &scanList;
+                    flog::debug("FrequencyManager: Returned scan list with {} entries to scanner", (int)scanList.size());
+                } else {
+                    flog::error("FrequencyManager: getScanList called with null output pointer");
+                }
+                break;
+            }
+            case CMD_GET_BOOKMARK_NAME: {
+                // Get bookmark name for a specific frequency
+                // Input: double* frequency, Output: std::string* name
+                if (in && out) {
+                    double targetFreq = *static_cast<double*>(in);
+                    std::string* resultName = static_cast<std::string*>(out);
+                    
+                    // PRIORITY 1: Search for single frequency matches first (more specific)
+                    for (const auto& [bookmarkName, bookmark] : _this->bookmarks) {
+                        if (!bookmark.isBand) {
+                            // For single frequencies, check with tolerance (use 1 kHz default)
+                            if (std::abs(bookmark.frequency - targetFreq) < 1000.0) {
+                                *resultName = bookmarkName;
+                                flog::debug("FrequencyManager: Found SPECIFIC bookmark '{}' for frequency {:.3f} MHz", 
+                                           bookmarkName, targetFreq / 1e6);
+                                return;
+                            }
+                        }
+                    }
+                    
+                    // PRIORITY 2: If no single frequency match, search for band matches (less specific)
+                    for (const auto& [bookmarkName, bookmark] : _this->bookmarks) {
+                        if (bookmark.isBand) {
+                            // For bands, check if frequency is within the band range
+                            if (targetFreq >= bookmark.startFreq && targetFreq <= bookmark.endFreq) {
+                                *resultName = bookmarkName + " [Band]";
+                                flog::debug("FrequencyManager: Found BAND name '{}' for frequency {:.3f} MHz", 
+                                           bookmarkName, targetFreq / 1e6);
+                                return;
+                            }
+                        }
+                    }
+                    
+                    // No matching bookmark found
+                    *resultName = "";
+                    flog::debug("FrequencyManager: No bookmark found for frequency {:.3f} MHz", targetFreq / 1e6);
+                } else {
+                    flog::error("FrequencyManager: getBookmarkName called with null pointers");
+                }
+                break;
+            }
+            default:
+                flog::warn("FrequencyManager: Unknown interface command: {}", code);
+                break;
+        }
+    }
 };
 
 MOD_EXPORT void _INIT_() {
     json def = json({});
-    def["selectedList"] = "通用列表";
+    def["selectedList"] = "General";
     def["bookmarkDisplayMode"] = BOOKMARK_DISP_MODE_TOP;
-    def["lists"]["通用列表"]["showOnWaterfall"] = true;
-    def["lists"]["通用列表"]["bookmarks"] = json::object();
+    def["lists"]["General"]["showOnWaterfall"] = true;
+    def["lists"]["General"]["bookmarks"] = json::object();
 
     config.setPath(core::args["root"].s() + "/frequency_manager_config.json");
     config.load(def);

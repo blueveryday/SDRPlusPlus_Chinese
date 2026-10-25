@@ -27,6 +27,9 @@
 #include <gui/colormaps.h>
 #include <gui/widgets/snr_meter.h>
 #include <gui/tuner.h>
+#ifdef __ANDROID__
+#include <gui/touch_scroll.h>
+#endif
 
 void MainWindow::init() {
     LoadingScreen::show("正在初始化用户界面");
@@ -439,6 +442,22 @@ void MainWindow::draw() {
     // Handle menu resize
     ImVec2 winSize = ImGui::GetWindowSize();
     ImVec2 mousePos = ImGui::GetMousePos();
+
+#ifdef __ANDROID__
+    // Android：每次启动时把左侧工作区宽度设为屏幕宽度的约 1/3（首帧拿到屏幕尺寸后设置一次）。
+    // 之后用户仍可以拖动分隔线临时调整，调整结果只在本次运行中生效。
+    if (!androidMenuWidthApplied) {
+        float screenW = ImGui::GetIO().DisplaySize.x;
+        if (screenW > 0.0f) {
+            float target = screenW / 3.0f;
+            float maxW = screenW - 250.0f;
+            if (maxW >= 250.0f) { target = std::clamp<float>(target, 250.0f, maxW); }
+            menuWidth = (int)target;
+            newWidth = menuWidth;
+            androidMenuWidthApplied = true;
+        }
+    }
+#endif
     if (!lockWaterfallControls && showMenu) {
         float curY = ImGui::GetCursorPosY();
         bool click = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
@@ -476,6 +495,28 @@ void MainWindow::draw() {
         ImGui::SetColumnWidth(1, std::max<int>(winSize.x - menuWidth - (60.0f * style::uiScale), 100.0f * style::uiScale));
         ImGui::SetColumnWidth(2, 60.0f * style::uiScale);
         ImGui::BeginChild("Left Column");
+
+#ifdef __ANDROID__
+        {
+            // 触摸上下滑动：应用输入层累计的滚动量，并告诉输入层面板当前的位置
+            // （弹窗/对话框打开时不启用，避免和弹窗里的列表抢手势）
+            float scrollDelta = touchscroll::consumeScroll();
+            if (scrollDelta != 0.0f) {
+                ImGui::SetScrollY(ImGui::GetScrollY() + scrollDelta);
+            }
+
+            ImVec2 panelPos = ImGui::GetWindowPos();
+            ImVec2 panelSize = ImGui::GetWindowSize();
+            // 右侧滚动条区域留给原来的拖动条操作
+            float scrollbarW = (ImGui::GetScrollMaxY() > 0.0f) ? ImGui::GetStyle().ScrollbarSize : 0.0f;
+            if (ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopup) || lockWaterfallControls) {
+                touchscroll::clearPanel();
+            }
+            else {
+                touchscroll::setPanel(panelPos.x, panelPos.y, panelPos.x + panelSize.x - scrollbarW, panelPos.y + panelSize.y, 8.0f * style::uiScale);
+            }
+        }
+#endif
 
         if (gui::menu.draw(firstMenuRender)) {
             core::configManager.acquire();
@@ -532,6 +573,9 @@ void MainWindow::draw() {
     }
     else {
         // When hiding the menu bar
+#ifdef __ANDROID__
+        touchscroll::clearPanel();
+#endif
         ImGui::Columns(3, "WindowColumns", false);
         ImGui::SetColumnWidth(0, 8 * style::uiScale);
         ImGui::SetColumnWidth(1, winSize.x - ((8 + 60) * style::uiScale));
@@ -671,6 +715,27 @@ void MainWindow::draw() {
     if (demoWindow) {
         ImGui::ShowDemoWindow();
     }
+}
+
+void MainWindow::setFFTMin(float min) {
+    // 同步滑块和瀑布图，并保存到配置
+    fftMin = min;
+    gui::waterfall.setFFTMin(min);
+    gui::waterfall.setWaterfallMin(min);
+
+    core::configManager.acquire();
+    core::configManager.conf["min"] = min;
+    core::configManager.release(true);
+}
+
+void MainWindow::setFFTMax(float max) {
+    fftMax = max;
+    gui::waterfall.setFFTMax(max);
+    gui::waterfall.setWaterfallMax(max);
+
+    core::configManager.acquire();
+    core::configManager.conf["max"] = max;
+    core::configManager.release(true);
 }
 
 void MainWindow::setPlayState(bool _playing) {

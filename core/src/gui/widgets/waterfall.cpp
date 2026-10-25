@@ -7,6 +7,10 @@
 #include <utils/flog.h>
 #include <gui/gui.h>
 #include <gui/style.h>
+#include <core.h>
+#include <imgui/stb_image.h>
+#include <imgui/stb_image_resize.h>
+#include <vector>
 
 float DEFAULT_COLOR_MAP[][3] = {
     { 0x00, 0x00, 0x20 },
@@ -115,6 +119,28 @@ namespace ImGui {
 
     void WaterFall::init() {
         glGenTextures(1, &textureId);
+
+        // 加载“自动量程”按钮图标；文件缺失时不报错，按钮退化为文字按钮
+        std::string resDir = core::configManager.conf["resourcesDirectory"];
+        int w = 0, h = 0, n = 0;
+        uint8_t* src = stbi_load((resDir + "/icons/auto_range.png").c_str(), &w, &h, &n, 4);
+        if (src) {
+            // 按钮只有 20 像素，预先缩小到 64x64 并按透明度加权，避免边缘锯齿和黑边
+            const int size = 64;
+            std::vector<uint8_t> iconBuf(size * size * 4);
+            stbir_resize_uint8_generic(src, w, h, w * 4, iconBuf.data(), size, size, size * 4, 4, 3, 0,
+                                       STBIR_EDGE_CLAMP, STBIR_FILTER_DEFAULT, STBIR_COLORSPACE_LINEAR, NULL);
+            glGenTextures(1, &autoBtnTextureId);
+            glBindTexture(GL_TEXTURE_2D, autoBtnTextureId);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, size, size, 0, GL_RGBA, GL_UNSIGNED_BYTE, iconBuf.data());
+            stbi_image_free(src);
+        }
+        else {
+            flog::warn("未找到自动量程图标: {0}/icons/auto_range.png", resDir);
+        }
     }
 
     void WaterFall::drawFFT() {
@@ -203,6 +229,44 @@ namespace ImGui {
         window->DrawList->AddLine(ImVec2(fftAreaMin.x, fftAreaMin.y),
                                   ImVec2(fftAreaMin.x, fftAreaMax.y - 1),
                                   text, style::uiScale);
+
+        // 自动量程按钮：把纵轴范围调整为当前频谱的最小/最大值（按 10 dB 取整）
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 12);
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (fftAreaMax.y - fftAreaMin.y) + 17);
+        bool autoRangeClicked = false;
+        if (autoBtnTextureId) {
+            autoRangeClicked = ImGui::ImageButton((ImTextureID)(uintptr_t)autoBtnTextureId, ImVec2(20, 20));
+        }
+        else {
+            autoRangeClicked = ImGui::Button("自动##_waterfall_auto_range_");
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("自动量程");
+        }
+        if (autoRangeClicked && latestFFT != NULL && dataWidth > 0) {
+            float min = INFINITY;
+            float max = -INFINITY;
+            for (int i = 0; i < dataWidth; i++) {
+                const float val = latestFFT[i];
+                if (val < min) { min = val; }
+                if (val > max) { max = val; }
+            }
+
+            // 按 10 dB 取整，并限制在滑块允许范围内
+            min = floorf(min / 10.0f) * 10.0f;
+            max = ceilf(max / 10.0f) * 10.0f;
+            min = std::clamp<float>(min, -150, 0);
+            max = std::clamp<float>(max, -150, 0);
+
+            // 保证量程至少 10 dB，避免频谱几乎平坦时范围为零
+            if (max - min < 10.0f) {
+                max = std::min<float>(min + 10.0f, 0.0f);
+                min = max - 10.0f;
+            }
+
+            gui::mainWindow.setFFTMin(min);
+            gui::mainWindow.setFFTMax(max);
+        }
     }
 
     void WaterFall::drawWaterfall() {
@@ -1214,6 +1278,24 @@ namespace ImGui {
 
     void WaterFall::releaseLatestFFT() {
         latestFFTMtx.unlock();
+    }
+
+    float* WaterFall::acquireRawFFT(int& width) {
+        buf_mtx.lock();
+        if (!rawFFTs) {
+            buf_mtx.unlock();
+            return NULL;
+        }
+        width = rawFFTSize;
+        // Return the most recent FFT line (same line pushFFT() consumes)
+        if (waterfallVisible) {
+            return &rawFFTs[currentFFTLine * rawFFTSize];
+        }
+        return rawFFTs;
+    }
+
+    void WaterFall::releaseRawFFT() {
+        buf_mtx.unlock();
     }
 
     void WaterfallVFO::setOffset(double offset) {

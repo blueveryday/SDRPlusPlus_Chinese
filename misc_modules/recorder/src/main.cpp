@@ -181,9 +181,15 @@ public:
         writer.setSamplerate(samplerate);
 
         // Open file
-        std::string vfoName = (recMode == RECORDER_MODE_AUDIO) ? selectedStreamName : "";
-        std::string extension = ".wav";
-        std::string expandedPath = expandString(folderSelect.path + "/" + genFileName(nameTemplate, recMode, vfoName) + extension);
+        std::string expandedPath;
+        if (externalControl && !externalFilename.empty()) {
+            expandedPath = expandString(externalFilename);
+        }
+        else {
+            std::string vfoName = (recMode == RECORDER_MODE_AUDIO) ? selectedStreamName : "";
+            std::string extension = ".wav";
+            expandedPath = expandString(folderSelect.path + "/" + genFileName(nameTemplate, recMode, vfoName) + extension);
+        }
         if (!writer.open(expandedPath)) {
             flog::error("Failed to open file for recording: {0}", expandedPath);
             return;
@@ -235,6 +241,13 @@ public:
         writer.close();
         
         recording = false;
+
+        // 释放外部控制状态
+        if (externalControl) {
+            externalControl = false;
+            externalFilename = "";
+            externalController = "";
+        }
     }
 
 private:
@@ -350,6 +363,10 @@ private:
         // Record button
         bool canRecord = _this->folderSelect.pathIsValid();
         if (_this->recMode == RECORDER_MODE_AUDIO) { canRecord &= !_this->selectedStreamName.empty(); }
+        if (_this->externalControl) {
+            ImGui::TextColored(ImVec4(0.0f, 0.8f, 1.0f, 1.0f), "控制方: %s", _this->externalController.c_str());
+        }
+        if (_this->externalControl) { style::beginDisabled(); }
         if (!_this->recording) {
             if (ImGui::Button(CONCAT("开始录制##_recorder_rec_", _this->name), ImVec2(menuWidth, 0))) {
                 _this->start();
@@ -367,10 +384,14 @@ private:
             if (_this->ignoreSilence && _this->ignoringSilence) {
                 ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "已暂停 %02d:%02d:%02d", dtm->tm_hour, dtm->tm_min, dtm->tm_sec);
             }
+            else if (_this->externalControl) {
+                ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), "录制中 %02d:%02d:%02d (%s)", dtm->tm_hour, dtm->tm_min, dtm->tm_sec, _this->externalController.c_str());
+            }
             else {
                 ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), "录制中 %02d:%02d:%02d", dtm->tm_hour, dtm->tm_min, dtm->tm_sec);
             }
         }
+        if (_this->externalControl) { style::endDisabled(); }
     }
 
     void selectStream(std::string name) {
@@ -578,6 +599,33 @@ private:
         else if (code == RECORDER_IFACE_CMD_STOP) {
             if (_this->recording) { _this->stop(); }
         }
+        else if (code == RECORDER_IFACE_CMD_START_WITH_FILENAME) {
+            if (!_this->recording && in != nullptr) {
+                const char* filename = (const char*)in;
+                _this->externalFilename = std::string(filename);
+                _this->externalControl = true;
+                _this->start();
+            }
+        }
+        else if (code == RECORDER_IFACE_CMD_GET_RECORDING_STATE) {
+            if (out != nullptr) {
+                bool* _out = (bool*)out;
+                *_out = _this->recording;
+            }
+        }
+        else if (code == RECORDER_IFACE_CMD_SET_EXTERNAL_CONTROL) {
+            if (in != nullptr) {
+                const char* controller = (const char*)in;
+                _this->externalControl = true;
+                _this->externalController = std::string(controller);
+            }
+        }
+        else if (code == RECORDER_IFACE_CMD_GET_EXTERNAL_CONTROL) {
+            if (out != nullptr) {
+                bool* _out = (bool*)out;
+                *_out = _this->externalControl;
+            }
+        }
     }
 
     std::string name;
@@ -620,6 +668,10 @@ private:
     dsp::convert::StereoToMono s2m;
 
     uint64_t samplerate = 48000;
+
+    bool externalControl = false;           // 录制器是否处于外部控制状态
+    std::string externalFilename = "";      // 外部控制方指定的文件名
+    std::string externalController = "";    // 外部控制模块名称
 
     EventHandler<std::string> onStreamRegisteredHandler;
     EventHandler<std::string> onStreamUnregisterHandler;

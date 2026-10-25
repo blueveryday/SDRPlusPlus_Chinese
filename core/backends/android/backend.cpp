@@ -14,7 +14,13 @@
 #include <gui/icons.h>
 #include <gui/style.h>
 #include <gui/menus/theme.h>
+#include <gui/touch_scroll.h>
+#include <cmath>
+#include <cfloat>
 #include <filesystem>
+#include <functional>
+#include <mutex>
+#include <vector>
 
 // Credit to the ImGui android OpenGL3 example for a lot of this code!
 
@@ -32,6 +38,8 @@ namespace backend {
     // Forward declaration
     int ShowSoftKeyboardInput();
     int PollUnicodeChars();
+    int HideSoftKeyboardInput();
+    void ProcessPendingDialogResults();
 
     void doPartialInit() {
         std::string root = (std::string)core::args["root"];
@@ -70,7 +78,101 @@ namespace backend {
         }
     }
 
+    // 左侧面板的触摸滑动手势（详见 gui/touch_scroll.h）。
+    // 返回 true 表示事件已处理，不再交给 ImGui。
+    static bool handleTouchScroll(AInputEvent* ev) {
+        if (AInputEvent_getType(ev) != AINPUT_EVENT_TYPE_MOTION) { return false; }
+
+        touchscroll::State& st = touchscroll::state();
+        ImGuiIO& io = ImGui::GetIO();
+
+        int32_t action = AMotionEvent_getAction(ev);
+        int32_t actionMasked = action & AMOTION_EVENT_ACTION_MASK;
+        float x = AMotionEvent_getX(ev, 0);
+        float y = AMotionEvent_getY(ev, 0);
+
+        // 只处理手指/手写笔/未知类型；实体鼠标保持原有行为（滚轮本来就能滚动）
+        int32_t tool = AMotionEvent_getToolType(ev, 0);
+        bool isTouch = (tool == AMOTION_EVENT_TOOL_TYPE_FINGER) || (tool == AMOTION_EVENT_TOOL_TYPE_STYLUS) || (tool == AMOTION_EVENT_TOOL_TYPE_UNKNOWN);
+
+        switch (actionMasked) {
+        case AMOTION_EVENT_ACTION_DOWN: {
+            // 上一次手势异常没收尾时，先收尾
+            if (st.phase == touchscroll::State::PASSTHROUGH) { io.AddMouseButtonEvent(0, false); }
+            st.phase = touchscroll::State::IDLE;
+
+            if (!isTouch || !st.valid) { return false; }
+            if (x < st.x0 || x >= st.x1 || y < st.y0 || y >= st.y1) { return false; }
+
+            st.phase = touchscroll::State::PENDING;
+            st.pressX = x;
+            st.pressY = y;
+            st.lastY = y;
+            // 只更新指针位置（让悬停高亮跟手），不发按下
+            io.AddMousePosEvent(x, y);
+            return true;
+        }
+        case AMOTION_EVENT_ACTION_MOVE: {
+            if (st.phase == touchscroll::State::PENDING) {
+                float dx = x - st.pressX;
+                float dy = y - st.pressY;
+                if ((dx * dx) + (dy * dy) < (st.slop * st.slop)) { return true; }
+
+                if (fabsf(dy) > fabsf(dx)) {
+                    // 竖直方向为主：开始滚动。把指针移出屏幕，避免控件保持悬停高亮
+                    st.phase = touchscroll::State::SCROLLING;
+                    st.lastY = y;
+                    io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+                }
+                else {
+                    // 水平方向为主：补发按下（位置为最初按下的点），后续按普通拖动处理
+                    st.phase = touchscroll::State::PASSTHROUGH;
+                    io.AddMousePosEvent(st.pressX, st.pressY);
+                    io.AddMouseButtonEvent(0, true);
+                    io.AddMousePosEvent(x, y);
+                }
+                return true;
+            }
+            if (st.phase == touchscroll::State::SCROLLING) {
+                // 手指向上移动，内容跟着向上，即滚动位置增大
+                st.pendingScroll += st.lastY - y;
+                st.lastY = y;
+                return true;
+            }
+            return false; // PASSTHROUGH / IDLE：交给 ImGui 处理
+        }
+        case AMOTION_EVENT_ACTION_UP:
+        case AMOTION_EVENT_ACTION_CANCEL: {
+            bool cancel = (actionMasked == AMOTION_EVENT_ACTION_CANCEL);
+            touchscroll::State::Phase phase = st.phase;
+            st.phase = touchscroll::State::IDLE;
+
+            if (phase == touchscroll::State::PENDING) {
+                // 没怎么移动：当作一次点按，补发按下 + 抬起（ImGui 会分到相邻两帧处理）
+                if (!cancel) {
+                    io.AddMousePosEvent(st.pressX, st.pressY);
+                    io.AddMouseButtonEvent(0, true);
+                    io.AddMouseButtonEvent(0, false);
+                }
+                return true;
+            }
+            if (phase == touchscroll::State::SCROLLING) {
+                return true;
+            }
+            if (phase == touchscroll::State::PASSTHROUGH) {
+                io.AddMousePosEvent(x, y);
+                io.AddMouseButtonEvent(0, false);
+                return true;
+            }
+            return false;
+        }
+        default:
+            return false;
+        }
+    }
+
     int32_t handleInputEvent(struct android_app* app, AInputEvent* inputEvent) {
+        if (handleTouchScroll(inputEvent)) { return 1; }
         return ImGui_ImplAndroid_HandleInputEvent(inputEvent);
     }
 
@@ -192,7 +294,11 @@ namespace backend {
                 }
             }
 
-            if (_EglDisplay == EGL_NO_DISPLAY) { continue; }
+            if (_EglDisplay == EGL_NO_DISPLAY) {
+                // 窗口已销毁（屏幕熄灭或切到后台）时不要空转，否则会占满一个 CPU 核心
+                std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                continue;
+            }
 
             if (!pauseRendering) {
                 // Initiate a new frame
@@ -203,10 +309,15 @@ namespace backend {
                 // FIXME: do not call this every frame because of JNI overhead
                 PollUnicodeChars();
 
+                // 在渲染线程处理文件选择器返回的结果（导入/导出）
+                ProcessPendingDialogResults();
+
                 // Open on-screen (soft) input if requested by Dear ImGui
                 static bool WantTextInputLast = false;
                 if (io.WantTextInput && !WantTextInputLast)
                 ShowSoftKeyboardInput();
+                else if (!io.WantTextInput && WantTextInputLast)
+                HideSoftKeyboardInput();
                 WantTextInputLast = io.WantTextInput;
 
                 // Render
@@ -267,6 +378,36 @@ namespace backend {
             return -3;
 
         jmethodID method_id = java_env->GetMethodID(native_activity_clazz, "showSoftInput", "()V");
+        if (method_id == NULL)
+            return -4;
+
+        java_env->CallVoidMethod(app->activity->clazz, method_id);
+
+        jni_return = java_vm->DetachCurrentThread();
+        if (jni_return != JNI_OK)
+            return -5;
+
+        return 0;
+    }
+
+    // 通知 Java 端收起软键盘（输入框失去焦点时调用）
+    int HideSoftKeyboardInput() {
+        JavaVM* java_vm = app->activity->vm;
+        JNIEnv* java_env = NULL;
+
+        jint jni_return = java_vm->GetEnv((void**)&java_env, JNI_VERSION_1_6);
+        if (jni_return == JNI_ERR)
+            return -1;
+
+        jni_return = java_vm->AttachCurrentThread(&java_env, NULL);
+        if (jni_return != JNI_OK)
+            return -2;
+
+        jclass native_activity_clazz = java_env->GetObjectClass(app->activity->clazz);
+        if (native_activity_clazz == NULL)
+            return -3;
+
+        jmethodID method_id = java_env->GetMethodID(native_activity_clazz, "hideSoftInput", "()V");
         if (method_id == NULL)
             return -4;
 
@@ -350,8 +491,20 @@ namespace backend {
         // Send the actual characters to Dear ImGui
         ImGuiIO& io = ImGui::GetIO();
         jint unicode_character;
-        while ((unicode_character = java_env->CallIntMethod(app->activity->clazz, method_id)) != 0)
-            io.AddInputCharacter(unicode_character);
+        while ((unicode_character = java_env->CallIntMethod(app->activity->clazz, method_id)) != 0) {
+            // 退格(8)和回车(10)不是可输入字符，ImGui 会丢弃它们，需要转换成按键事件
+            if (unicode_character == 8) {
+                io.AddKeyEvent(ImGuiKey_Backspace, true);
+                io.AddKeyEvent(ImGuiKey_Backspace, false);
+            }
+            else if (unicode_character == 10) {
+                io.AddKeyEvent(ImGuiKey_Enter, true);
+                io.AddKeyEvent(ImGuiKey_Enter, false);
+            }
+            else {
+                io.AddInputCharacter(unicode_character);
+            }
+        }
 
         jni_return = java_vm->DetachCurrentThread();
         if (jni_return != JNI_OK)
@@ -486,3 +639,113 @@ extern "C" {
         sdrpp_main(3, dummy);
     }
 }
+
+#ifdef __ANDROID__
+namespace backend {
+    static std::function<void(std::string)> g_openCallback = nullptr;
+    static std::function<void(std::string)> g_saveCallback = nullptr;
+    static std::mutex g_dialogMtx;
+    static std::vector<std::function<void()>> g_pendingDialogResults;
+
+    // 在 MainActivity 实例上调用 Java 方法。
+    // 注意：不能在原生线程里用 FindClass 查找应用自己的类（原生线程只能使用系统类加载器，
+    // 会抛出 ClassNotFoundException 导致闪退），所以通过 MainActivity 对象转发给 Java 端。
+    template <typename F>
+    static void withActivity(F fn) {
+        JavaVM* java_vm = app->activity->vm;
+        JNIEnv* java_env = NULL;
+        bool attached = false;
+        jint r = java_vm->GetEnv((void**)&java_env, JNI_VERSION_1_6);
+        if (r == JNI_EDETACHED) {
+            if (java_vm->AttachCurrentThread(&java_env, NULL) != JNI_OK) { return; }
+            attached = true;
+        }
+        else if (r != JNI_OK) {
+            return;
+        }
+
+        jclass cls = java_env->GetObjectClass(app->activity->clazz);
+        if (cls) {
+            fn(java_env, app->activity->clazz, cls);
+            java_env->DeleteLocalRef(cls);
+        }
+        if (java_env->ExceptionCheck()) {
+            java_env->ExceptionDescribe();
+            java_env->ExceptionClear();
+        }
+        if (attached) { java_vm->DetachCurrentThread(); }
+    }
+
+    void openFileDialog(std::function<void(std::string)> callback) {
+        {
+            std::lock_guard<std::mutex> lck(g_dialogMtx);
+            g_openCallback = callback;
+        }
+        withActivity([](JNIEnv* env, jobject activity, jclass cls) {
+            jmethodID method = env->GetMethodID(cls, "openFilePicker", "()V");
+            if (method) { env->CallVoidMethod(activity, method); }
+        });
+    }
+
+    void saveFileDialog(std::string cacheFilePath, std::string defaultName, std::function<void(std::string)> callback) {
+        {
+            std::lock_guard<std::mutex> lck(g_dialogMtx);
+            g_saveCallback = callback;
+        }
+        withActivity([&](JNIEnv* env, jobject activity, jclass cls) {
+            jmethodID method = env->GetMethodID(cls, "saveFilePicker", "(Ljava/lang/String;Ljava/lang/String;)V");
+            if (method) {
+                jstring jPath = env->NewStringUTF(cacheFilePath.c_str());
+                jstring jName = env->NewStringUTF(defaultName.c_str());
+                env->CallVoidMethod(activity, method, jPath, jName);
+                env->DeleteLocalRef(jPath);
+                env->DeleteLocalRef(jName);
+            }
+        });
+    }
+
+    // 文件选择结果由 Java 的界面线程回调进来；真正的处理（导入书签会修改界面正在使用的数据）
+    // 放到渲染线程中执行，避免和界面绘制同时访问数据导致崩溃
+    void ProcessPendingDialogResults() {
+        std::vector<std::function<void()>> pending;
+        {
+            std::lock_guard<std::mutex> lck(g_dialogMtx);
+            pending.swap(g_pendingDialogResults);
+        }
+        for (auto& fn : pending) {
+            // 回调里（例如导入书签）抛出的异常不能传出渲染线程，否则会直接闪退
+            try { fn(); }
+            catch (const std::exception& e) { flog::error("File dialog callback failed: {0}", e.what()); }
+            catch (...) { flog::error("File dialog callback failed with unknown exception"); }
+        }
+    }
+
+    static std::string jstringToStd(JNIEnv* env, jstring str) {
+        if (!str) { return ""; }
+        const char* chars = env->GetStringUTFChars(str, nullptr);
+        std::string result(chars ? chars : "");
+        if (chars) { env->ReleaseStringUTFChars(str, chars); }
+        return result;
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL Java_org_sdrpp_sdrpp_SdrFilePicker_nativeOnResultOpen(JNIEnv* env, jobject thiz, jstring path) {
+    std::string result = backend::jstringToStd(env, path);
+    std::lock_guard<std::mutex> lck(backend::g_dialogMtx);
+    if (backend::g_openCallback) {
+        auto cb = backend::g_openCallback;
+        backend::g_openCallback = nullptr;
+        backend::g_pendingDialogResults.push_back([cb, result]() { cb(result); });
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL Java_org_sdrpp_sdrpp_SdrFilePicker_nativeOnResultSave(JNIEnv* env, jobject thiz, jstring result) {
+    std::string res = backend::jstringToStd(env, result);
+    std::lock_guard<std::mutex> lck(backend::g_dialogMtx);
+    if (backend::g_saveCallback) {
+        auto cb = backend::g_saveCallback;
+        backend::g_saveCallback = nullptr;
+        backend::g_pendingDialogResults.push_back([cb, res]() { cb(res); });
+    }
+}
+#endif

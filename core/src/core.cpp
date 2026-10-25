@@ -13,6 +13,7 @@
 #include <core.h>
 #include <filesystem>
 #include <gui/menus/theme.h>
+#include <gui/menus/display.h>
 #include <backend.h>
 
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
@@ -124,6 +125,9 @@ int sdrpp_main(int argc, char* argv[]) {
     defConfig["fastFFT"] = false;
     defConfig["fftHeight"] = 300;
     defConfig["fftRate"] = 20;
+    defConfig["mpxLineWidth"] = displaymenu::MPX_DEFAULT_LINE_WIDTH;
+    defConfig["mpxRefreshRate"] = displaymenu::MPX_DEFAULT_REFRESH_RATE;
+    defConfig["mpxSmoothingFactor"] = displaymenu::MPX_DEFAULT_SMOOTHING_FACTOR;
     defConfig["fftSize"] = 65536;
     defConfig["fftWindow"] = 2;
     defConfig["frequency"] = 100000000.0;
@@ -224,8 +228,7 @@ int sdrpp_main(int argc, char* argv[]) {
     defConfig["moduleInstances"]["Rigctl 服务器"] = "rigctl_server";
     // defConfig["moduleInstances"]["Rigctl Client"] = "rigctl_client";
     // TODO: Enable rigctl_client when ready
-    // defConfig["moduleInstances"]["Scanner"] = "scanner";
-    // TODO: Enable scanner when ready
+    defConfig["moduleInstances"]["扫描器"] = "scanner";
 
 
     // Themes

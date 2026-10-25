@@ -20,7 +20,7 @@ namespace dsp::demod {
     public:
         BroadcastFM() {}
 
-        BroadcastFM(stream<complex_t>* in, double deviation, double samplerate, bool stereo = true, bool lowPass = true, bool rdsOut = false) { init(in, deviation, samplerate, stereo, lowPass); }
+        BroadcastFM(stream<complex_t>* in, double deviation, double samplerate, bool stereo = true, bool lowPass = true, bool rdsOut = false, bool mpxOut = false) { init(in, deviation, samplerate, stereo, lowPass, rdsOut, mpxOut); }
 
         ~BroadcastFM() {
             if (!base_type::_block_init) { return; }
@@ -32,12 +32,13 @@ namespace dsp::demod {
             taps::free(audioFirTaps);
         }
 
-        virtual void init(stream<complex_t>* in, double deviation, double samplerate, bool stereo = true, bool lowPass = true, bool rdsOut = false) {
+        virtual void init(stream<complex_t>* in, double deviation, double samplerate, bool stereo = true, bool lowPass = true, bool rdsOut = false, bool mpxOut = false) {
             _deviation = deviation;
             _samplerate = samplerate;
             _stereo = stereo;
             _lowPass = lowPass;
             _rdsOut = rdsOut;
+            _mpxOut = mpxOut;
             
             demod.init(NULL, _deviation, _samplerate);
             pilotFirTaps = taps::bandPass<complex_t>(18750.0, 19250.0, 3000.0, _samplerate, true);
@@ -127,6 +128,15 @@ namespace dsp::demod {
             base_type::tempStart();
         }
 
+        void setMPXOut(bool mpxOut) {
+            assert(base_type::_block_init);
+            std::lock_guard<std::recursive_mutex> lck(base_type::ctrlMtx);
+            base_type::tempStop();
+            _mpxOut = mpxOut;
+            reset();
+            base_type::tempStart();
+        }
+
         void reset() {
             assert(base_type::_block_init);
             std::lock_guard<std::recursive_mutex> lck(base_type::ctrlMtx);
@@ -141,9 +151,15 @@ namespace dsp::demod {
             base_type::tempStart();
         }
 
-        inline int process(int count, complex_t* in, stereo_t* out, int& rdsOutCount, complex_t* rdsout = NULL) {
+        inline int process(int count, complex_t* in, stereo_t* out, int& rdsOutCount, complex_t* rdsout = NULL, float* mpxout = NULL) {
             // Demodulate
             demod.process(count, in, demod.out.writeBuf);
+            
+            // Capture raw MPX signal for analysis (if enabled)
+            if (_mpxOut && mpxout) {
+                memcpy(mpxout, demod.out.writeBuf, count * sizeof(float));
+            }
+            
             if (_stereo) {
                 // Convert to complex
                 rtoc.process(count, demod.out.writeBuf, rtoc.out.writeBuf);
@@ -219,10 +235,22 @@ namespace dsp::demod {
             if (count < 0) { return -1; }
 
             int rdsOutCount = 0;
-            process(count, base_type::_in->readBuf, base_type::out.writeBuf, rdsOutCount, rdsOut.writeBuf);
+            
+            // Prepare MPX buffer if needed
+            float* mpxBuffer = (_mpxOut) ? mpxOut.writeBuf : NULL;
+            
+            process(count, base_type::_in->readBuf, base_type::out.writeBuf, rdsOutCount, rdsOut.writeBuf, mpxBuffer);
 
             base_type::_in->flush();
             if (!base_type::out.swap(count)) { return -1; }
+            
+            // MPX output - asynchronous, never blocks main signal path
+            if (_mpxOut && mpxBuffer) {
+                // This swap is non-blocking - if it fails, we just skip this frame
+                // The analyzer will handle missing frames gracefully
+                mpxOut.swap(count);
+            }
+            
             if (rdsOutCount && _rdsOut) {
                 if (!rdsOut.swap(rdsOutCount)) { return -1; }
             }
@@ -230,6 +258,7 @@ namespace dsp::demod {
         }
 
         stream<complex_t> rdsOut;
+        stream<float> mpxOut;
 
     protected:
         double _deviation;
@@ -237,6 +266,7 @@ namespace dsp::demod {
         bool _stereo;
         bool _lowPass;
         bool _rdsOut;
+        bool _mpxOut;
 
         Quadrature demod;
         tap<complex_t> pilotFirTaps;

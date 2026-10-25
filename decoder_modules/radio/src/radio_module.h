@@ -825,6 +825,20 @@ private:
             dsp::noise_reduction::CTCSSTone* _in = (dsp::noise_reduction::CTCSSTone*)in;
             _this->setCTCSSTone(*_in);
         }
+        else if (code == RADIO_IFACE_CMD_GET_SQUELCH_ENABLED && out) {
+            // Scanner compatibility: squelch counts as enabled when any squelch mode is active
+            bool* _out = (bool*)out;
+            *_out = (_this->squelchModes[_this->squelchModeId] != SQUELCH_MODE_OFF);
+        }
+        else if (code == RADIO_IFACE_CMD_SET_SQUELCH_ENABLED && in && _this->enabled) {
+            // Scanner compatibility: enabled -> power squelch, disabled -> off
+            bool* _in = (bool*)in;
+            _this->setSquelchMode(*_in ? SQUELCH_MODE_POWER : SQUELCH_MODE_OFF);
+        }
+        else if (code == RADIO_IFACE_CMD_GET_EFFECTIVE_SQUELCH_LEVEL && out) {
+            float* _out = (float*)out;
+            *_out = _this->squelchLevel;
+        }
         else if (code == RADIO_IFACE_CMD_GET_HIGHPASS && out) {
             bool* _out = (bool*)out;
             *_out = _this->highPass;

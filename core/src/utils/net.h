@@ -103,7 +103,27 @@ namespace net {
          */
         void setPort(int port);
 
-        struct sockaddr_in addr;
+        /**
+         * Check if this is an IPv6 address.
+         */
+        bool isIPv6() const;
+
+        /**
+         * Get the address family (AF_INET or AF_INET6).
+         */
+        int family() const;
+
+        /**
+         * Get the size of the underlying sockaddr structure for this address family.
+         */
+        int size() const;
+
+        /**
+         * Check if the IP is the unspecified wildcard address (0.0.0.0 or ::).
+         */
+        bool isUnspecified() const;
+
+        struct sockaddr_storage addr;
     };
 
     enum {
