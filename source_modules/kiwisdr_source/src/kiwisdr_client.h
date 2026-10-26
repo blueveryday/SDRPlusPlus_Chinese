@@ -393,14 +393,12 @@ struct KiwiSDRClient {
                                 auto pos = resp.find("\r\n\r\n");
                                 if (pos != std::string::npos) {
                                     std::string body = resp.substr(pos + 4);
-                                    // 目标格式: {"maj":1,"min":902,"ts":4611686869679014366,"sp":0}
                                     auto tsKeyPos = body.find("\"ts\":");
                                     if (tsKeyPos != std::string::npos) {
-                                        auto valStart = tsKeyPos + 5; // 跳过 "ts":
+                                        auto valStart = tsKeyPos + 5;
                                         auto valEnd = body.find_first_of(",}", valStart);
                                         if (valEnd != std::string::npos) {
                                             realTs = body.substr(valStart, valEnd - valStart);
-                                            // 去除可能存在的空格和回车
                                             realTs.erase(std::remove(realTs.begin(), realTs.end(), ' '), realTs.end());
                                             realTs.erase(std::remove(realTs.begin(), realTs.end(), '\r'), realTs.end());
                                             realTs.erase(std::remove(realTs.begin(), realTs.end(), '\n'), realTs.end());
@@ -416,12 +414,34 @@ struct KiwiSDRClient {
                     }
 
                     if (realTs.empty()) {
-                        // 如果没拿到，回退到本地时间，但大概率连不上
                         realTs = std::to_string(kiwiNowMillis());
                         flog::warn("KiwiSDRClient: failed to get ts from /VER, using local: {}", realTs);
                     }
 
-                    // === 2. 使用获取到的 ts 拼接真实的 WebSocket 路径 ===
+                    // === 新增：启动静默的 /W/F 瀑布图连接 ===
+                    // 这至关重要，因为真实的浏览器都会同时连 W/F 和 SND
+                    std::string wfPath = ep.basePath + "/ws/kiwi/" + realTs + "/W/F";
+                    flog::info("KiwiSDRClient: Launching background dummy W/F connection...");
+                    std::thread wfThread([this, ep, wfPath]() {
+                        kiwiSetThreadName("kiwisdr.wf");
+                        try {
+                            net::websock::WSClient wfClient;
+                            wfClient.userAgent = wsClient.userAgent;
+                            wfClient.cookie = wsClient.cookie;
+                            // 我们不需要处理 W/F 的数据，只要保持连接即可
+                            wfClient.onBinaryMessage = [](const std::string&) {};
+                            wfClient.onTextMessage = [](const std::string&) {};
+                            wfClient.onEveryReceive = []() {};
+                            // 连接并阻塞在接收循环里，直到主线程退出或网络断开
+                            wfClient.connectAndReceiveLoop(ep.host, ep.port, wfPath);
+                        } catch (const std::exception& e) {
+                            flog::warn("Dummy W/F connection closed: {}", e.what());
+                        }
+                    });
+                    wfThread.detach();
+                    // ======================================
+
+                    // === 2. 连接 /SND 音频流 ===
                     std::string wsPath = ep.basePath + "/ws/kiwi/" + realTs + "/SND";
                     flog::info("KiwiSDRClient: Connecting WS to path: {}", wsPath);
                     
