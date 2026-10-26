@@ -29,7 +29,7 @@
 struct KiwiEndpoint {
     std::string host;
     int port = 0;
-    std::string basePath; // ·´Ïò´úÀí×ÓÂ·¾¶£¬ÀıÈç "/kiwi-sub"£¬Ä©Î²²»´ø '/'
+    std::string basePath; // åå‘ä»£ç†å­è·¯å¾„ï¼Œä¾‹å¦‚ "/kiwi-sub"ï¼Œæœ«å°¾ä¸å¸¦ '/'
     std::string error;
 };
 
@@ -103,10 +103,10 @@ inline KiwiEndpoint kiwiParseSite(std::string s) {
         return ep;
     }
     else if (scheme == "http" || scheme == "ws") {
-        ep.port = 80; // ÏÔÊ½Ğ´ÁË http:// ÇÒÃ»Ğ´¶Ë¿Ú£¬ä¯ÀÀÆ÷»áÓÃ 80
+        ep.port = 80; // æ˜¾å¼å†™äº† http:// ä¸”æ²¡å†™ç«¯å£ï¼Œæµè§ˆå™¨ä¼šç”¨ 80
     }
     else {
-        ep.port = 8073; // Ö»Ğ´Ö÷»úÃûÊ±±£³Ö KiwiSDR Ä¬ÈÏ¶Ë¿Ú
+        ep.port = 8073; // åªå†™ä¸»æœºåæ—¶ä¿æŒ KiwiSDR é»˜è®¤ç«¯å£
     }
     return ep;
 }
@@ -153,7 +153,7 @@ struct KiwiSDRClient {
         };
 
         wsClient.onConnected = [&]() {
-            // ¾¡Á¿Ìù½ü KiwiSDR ÍøÒ³¶Ë openwebrx.js µÄ³õÊ¼»¯Ë³Ğò
+            // å°½é‡è´´è¿‘ KiwiSDR ç½‘é¡µç«¯ openwebrx.js çš„åˆå§‹åŒ–é¡ºåº
             wsClient.sendString("SET auth t=kiwi p=#");
             wsClient.sendString("SERVER DE CLIENT openwebrx.js SND");
             if (!identUser.empty()) {
@@ -317,7 +317,7 @@ struct KiwiSDRClient {
         };
         lastPing = kiwiNowMillis();
         wsClient.onEveryReceive = [&]() {
-            // ä¯ÀÀÆ÷¶Ë²»ÊÇ 4 Ãë·¢Ò»´Î keepalive£»·Å¿íµ½ 15 Ãë£¬½µµÍ´¥·¢·şÎñÆ÷ËÙÂÊÏŞÖÆµÄ¸ÅÂÊ
+            // æµè§ˆå™¨ç«¯ä¸æ˜¯ 4 ç§’å‘ä¸€æ¬¡ keepaliveï¼›æ”¾å®½åˆ° 15 ç§’ï¼Œé™ä½è§¦å‘æœåŠ¡å™¨é€Ÿç‡é™åˆ¶çš„æ¦‚ç‡
             if (kiwiNowMillis() - lastPing > 15000) {
                 wsClient.sendString("SET keepalive");
                 lastPing = kiwiNowMillis();
@@ -372,11 +372,11 @@ struct KiwiSDRClient {
                     failed = true;
                 }
                 else {
-                    // === 1. ·¢ËÍ HTTP GET /VER »ñÈ¡ÕæÊµ ts ===
+                    // === 1. å‘é€ HTTP GET /VER è·å–çœŸå® ts ===
                     std::string realTs = "";
                     try {
                         flog::info("KiwiSDRClient: GET /VER ...");
-                        auto httpSock = net::connect(Address(ep.host, ep.port));
+                        auto httpSock = net::connect(net::Address(ep.host, ep.port));
                         if (httpSock) {
                             std::string req = "GET " + ep.basePath + "/VER HTTP/1.1\r\n";
                             req += "Host: " + ep.host + (ep.port == 80 ? "" : ":" + std::to_string(ep.port)) + "\r\n";
@@ -393,14 +393,14 @@ struct KiwiSDRClient {
                                 auto pos = resp.find("\r\n\r\n");
                                 if (pos != std::string::npos) {
                                     std::string body = resp.substr(pos + 4);
-                                    // Ä¿±ê¸ñÊ½: {"maj":1,"min":902,"ts":4611686869679014366,"sp":0}
+                                    // ç›®æ ‡æ ¼å¼: {"maj":1,"min":902,"ts":4611686869679014366,"sp":0}
                                     auto tsKeyPos = body.find("\"ts\":");
                                     if (tsKeyPos != std::string::npos) {
-                                        auto valStart = tsKeyPos + 5; // Ìø¹ı "ts":
+                                        auto valStart = tsKeyPos + 5; // è·³è¿‡ "ts":
                                         auto valEnd = body.find_first_of(",}", valStart);
                                         if (valEnd != std::string::npos) {
                                             realTs = body.substr(valStart, valEnd - valStart);
-                                            // È¥³ı¿ÉÄÜ´æÔÚµÄ¿Õ¸ñºÍ»Ø³µ
+                                            // å»é™¤å¯èƒ½å­˜åœ¨çš„ç©ºæ ¼å’Œå›è½¦
                                             realTs.erase(std::remove(realTs.begin(), realTs.end(), ' '), realTs.end());
                                             realTs.erase(std::remove(realTs.begin(), realTs.end(), '\r'), realTs.end());
                                             realTs.erase(std::remove(realTs.begin(), realTs.end(), '\n'), realTs.end());
@@ -416,12 +416,12 @@ struct KiwiSDRClient {
                     }
 
                     if (realTs.empty()) {
-                        // Èç¹ûÃ»ÄÃµ½£¬»ØÍËµ½±¾µØÊ±¼ä£¬µ«´ó¸ÅÂÊÁ¬²»ÉÏ
+                        // å¦‚æœæ²¡æ‹¿åˆ°ï¼Œå›é€€åˆ°æœ¬åœ°æ—¶é—´ï¼Œä½†å¤§æ¦‚ç‡è¿ä¸ä¸Š
                         realTs = std::to_string(kiwiNowMillis());
                         flog::warn("KiwiSDRClient: failed to get ts from /VER, using local: {}", realTs);
                     }
 
-                    // === 2. Ê¹ÓÃ»ñÈ¡µ½µÄ ts Æ´½ÓÕæÊµµÄ WebSocket Â·¾¶ ===
+                    // === 2. ä½¿ç”¨è·å–åˆ°çš„ ts æ‹¼æ¥çœŸå®çš„ WebSocket è·¯å¾„ ===
                     std::string wsPath = ep.basePath + "/ws/kiwi/" + realTs + "/SND";
                     flog::info("KiwiSDRClient: Connecting WS to path: {}", wsPath);
                     
