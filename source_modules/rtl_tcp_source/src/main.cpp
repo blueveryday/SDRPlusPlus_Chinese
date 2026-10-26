@@ -6,6 +6,7 @@
 #include <signal_path/signal_path.h>
 #include <core.h>
 #include <gui/smgui.h>
+#include <utils/host_history.h>
 #include <gui/style.h>
 #include <utils/optionlist.h>
 
@@ -48,6 +49,7 @@ public:
         srId = samplerates.valueId(2.4e6);
 
         // Load config
+        hostHistory.load("rtl_tcp");
         config.acquire();
         if (config.conf.contains("host")) {
             std::string hostStr = config.conf["host"];
@@ -137,6 +139,9 @@ private:
             flog::error("Could connect to RTL-TCP server: {}", e.what());
             return;
         }
+
+        // 连接成功：记住地址和端口
+        _this->hostHistory.add(_this->ip, _this->port);
         
         // Sync settings
         _this->client->setFrequency(_this->freq);
@@ -192,6 +197,17 @@ private:
 
         if (_this->running) { SmGui::BeginDisabled(); }
 
+        // 地址历史：从下拉框选一条，同时填好地址和端口
+        SmGui::FillWidth();
+        if (SmGui::Combo(CONCAT("##_rtltcp_hist_", _this->name), &_this->hostHistoryId, _this->hostHistory.items())) {
+            if (_this->hostHistory.select(_this->hostHistoryId, _this->ip, sizeof(_this->ip), &_this->port) == HostHistory::SELECTED) {
+                config.acquire();
+                config.conf["host"] = std::string(_this->ip);
+                config.conf["port"] = _this->port;
+                config.release(true);
+            }
+            _this->hostHistoryId = 0;
+        }
         if (SmGui::InputText(CONCAT("##_ip_select_", _this->name), _this->ip, 1024)) {
             config.acquire();
             config.conf["host"] = std::string(_this->ip);
@@ -308,6 +324,8 @@ private:
 
     char ip[1024] = "localhost";
     int port = 1234;
+    HostHistory hostHistory;
+    int hostHistoryId = 0;
     int srId = 0;
     int directSamplingId = 0;
     int ppm = 0;

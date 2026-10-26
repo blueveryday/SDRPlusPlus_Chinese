@@ -85,6 +85,9 @@ namespace backend {
         }
     }
 
+    // 本次手势按下时所在的内部滚动区下标（-1 表示不在任何列表上）
+    static int s_pressInner = -1;
+
     // 左侧面板的触摸滑动手势（详见 gui/touch_scroll.h）。
     // 返回 true 表示事件已处理，不再交给 ImGui。
     static bool handleTouchScroll(AInputEvent* ev) {
@@ -112,6 +115,12 @@ namespace backend {
             if (x < st.x0 || x >= st.x1 || y < st.y0 || y >= st.y1) { return false; }
             // 按在模块自己的滚动条上：直接交给 ImGui，让滚动条可以拖动
             if (touchscroll::inExclusion(x, y)) { return false; }
+            // 菜单顺序未锁定时，按在菜单标题栏上：直接交给 ImGui，这样才能上下拖动标题调整菜单顺序
+            if (touchscroll::inDragHandle(x, y)) { return false; }
+
+            // 记录按下的位置在哪个内部滚动区（频率管理器的列表等），竖直滑动时优先滚动它
+            s_pressInner = touchscroll::findInner(x, y);
+            st.target = 0;
 
             st.phase = touchscroll::State::PENDING;
             st.pressX = x;
@@ -132,6 +141,16 @@ namespace backend {
                     st.phase = touchscroll::State::SCROLLING;
                     st.lastY = y;
                     io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+
+                    // 决定滚动谁：按在列表上且列表还能往手指拖动的方向滚，就滚列表；
+                    // 列表已经在头/尾、手指还往外拉时，滚动整个面板
+                    st.target = 0;
+                    if (s_pressInner >= 0) {
+                        float sy = st.innerScrollY[s_pressInner];
+                        float sm = st.innerScrollMax[s_pressInner];
+                        bool canScroll = (dy > 0.0f) ? (sy > 0.5f) : (sy < sm - 0.5f);
+                        if (canScroll) { st.target = st.innerIds[s_pressInner]; }
+                    }
                 }
                 else {
                     // 水平方向为主：补发按下（位置为最初按下的点），后续按普通拖动处理
@@ -144,7 +163,8 @@ namespace backend {
             }
             if (st.phase == touchscroll::State::SCROLLING) {
                 // 手指向上移动，内容跟着向上，即滚动位置增大
-                st.pendingScroll += st.lastY - y;
+                if (st.target != 0) { st.pendingInnerScroll += st.lastY - y; }
+                else { st.pendingScroll += st.lastY - y; }
                 st.lastY = y;
                 return true;
             }

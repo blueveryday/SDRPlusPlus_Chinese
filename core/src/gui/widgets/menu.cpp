@@ -2,6 +2,9 @@
 #include <imgui/imgui.h>
 #include <imgui/imgui_internal.h>
 #include <gui/style.h>
+#ifdef __ANDROID__
+#include <gui/touch_scroll.h>
+#endif
 
 Menu::Menu() {
 }
@@ -82,6 +85,14 @@ bool Menu::draw(bool updateStates) {
 
         headerTops[displayedCount - 1] = posMin.y;
         optionIDs[displayedCount - 1] = rawId - 1;
+
+#ifdef __ANDROID__
+        // Android：触摸竖直滑动默认用来滚动左侧面板，会吃掉标题栏上的拖动。
+        // 菜单顺序未锁定时，把标题栏登记为“拖动手柄”，按在上面的触摸直接交给 ImGui，才能拖动调整顺序。
+        if (!locked) {
+            touchscroll::addDragHandle(posMin.x, posMin.y, posMax.x, posMax.y);
+        }
+#endif
 
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && ImGui::IsMouseHoveringRect(posMin, posMax)) {
             menuClicked = true;
@@ -197,6 +208,21 @@ bool Menu::draw(bool updateStates) {
     }
 
     if (!draggedMenuName.empty()) {
+        // 拖动标题靠近面板上/下边缘时自动滚动，菜单很长（尤其是手机竖屏）时才能拖到看不见的位置
+        if (window->ScrollMax.y > 0.0f) {
+            float edge = 48.0f * style::uiScale;
+            float speed = 700.0f * style::uiScale * ImGui::GetIO().DeltaTime;
+            float mouseY = ImGui::GetMousePos().y;
+            float top = window->Pos.y;
+            float bottom = window->Pos.y + window->Size.y;
+            if (mouseY < top + edge) {
+                ImGui::SetScrollY(ImGui::GetScrollY() - speed);
+            }
+            else if (mouseY > bottom - edge) {
+                ImGui::SetScrollY(ImGui::GetScrollY() + speed);
+            }
+        }
+
         insertBefore = displayedCount;
         ImVec2 mPos = ImGui::GetMousePos();
         for (int i = 0; i < displayedCount; i++) {

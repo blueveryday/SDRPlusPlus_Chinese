@@ -13,6 +13,7 @@
 #include <config.h>
 #include <gui/widgets/stepped_slider.h>
 #include <gui/smgui.h>
+#include <utils/host_history.h>
 
 #define CONCAT(a, b) ((std::string(a) + b).c_str())
 
@@ -69,6 +70,7 @@ public:
         handler.stream = &stream;
 
         snprintf(hostname, sizeof(hostname), "%s", host.c_str());
+        hostHistory.load("spyserver");
 
         sigpath::sourceManager.registerSource("SpyServer", &handler);
     }
@@ -172,6 +174,17 @@ private:
         gui::mainWindow.playButtonLocked = !connected;
 
         if (connected || connecting) { SmGui::BeginDisabled(); }
+        // 地址历史：从下拉框选一条，同时填好地址和端口
+        SmGui::FillWidth();
+        if (SmGui::Combo(CONCAT("##_spyserver_srv_hist_", _this->name), &_this->hostHistoryId, _this->hostHistory.items())) {
+            if (_this->hostHistory.select(_this->hostHistoryId, _this->hostname, sizeof(_this->hostname), &_this->port) == HostHistory::SELECTED) {
+                config.acquire();
+                config.conf["hostname"] = _this->hostname;
+                config.conf["port"] = _this->port;
+                config.release(true);
+            }
+            _this->hostHistoryId = 0;
+        }
         if (SmGui::InputText(CONCAT("##_spyserver_srv_host_", _this->name), _this->hostname, 1023)) {
             config.acquire();
             config.conf["hostname"] = _this->hostname;
@@ -319,6 +332,9 @@ private:
         }
         client = std::move(c);
 
+        // 连接成功：记住这个地址和端口
+        hostHistory.add(hostname, port);
+
         char buf[1024];
         sprintf(buf, "%s [%08X]", deviceTypesStr[client->devInfo.DeviceType], client->devInfo.DeviceSerial);
         devRef = std::string(buf);
@@ -361,6 +377,8 @@ private:
 
     char hostname[1024];
     int port = 5555;
+    HostHistory hostHistory;
+    int hostHistoryId = 0;
     int iqType = 0;
 
     int srId = 0;

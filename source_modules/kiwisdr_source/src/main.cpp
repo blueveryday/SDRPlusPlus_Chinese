@@ -16,6 +16,7 @@
 #include <signal_path/signal_path.h>
 #include <core.h>
 #include <config.h>
+#include <utils/host_history.h>
 #include <atomic>
 #include <thread>
 #include <vector>
@@ -45,18 +46,21 @@ struct KiwiSDRSourceModule : public ModuleManager::Instance {
 
         config.acquire();
         if (config.conf.contains("kiwisdr_site")) {
+            // 配置里保存的是 "主机:端口"（旧版本也可能是 http://主机:端口/ 这样的网址），拆成地址和端口两个输入框
             std::string site = config.conf["kiwisdr_site"];
-            snprintf(siteBuf, sizeof(siteBuf), "%s", site.c_str());
+            setSite(site);
         }
         if (config.conf.contains("kiwisdr_loc")) {
             kiwisdrLoc = config.conf["kiwisdr_loc"];
         }
         config.release(false);
 
-        kiwiSdrClient.init(siteBuf);
+        hostHistory.load("kiwisdr");
+        kiwiSdrClient.init(siteString());
 
         kiwiSdrClient.onConnected = [this]() {
             connected = true;
+            historyPending = true;  // 连接成功：到界面线程里记入地址历史（这里是网络线程）
             tune(lastTuneFrequency, this);
         };
         kiwiSdrClient.onDisconnected = [this]() {
@@ -119,7 +123,7 @@ private:
         if (_this->feeder.joinable()) { _this->feeder.join(); }
 
         _this->running = true;
-        _this->kiwiSdrClient.init(_this->siteBuf);
+        _this->kiwiSdrClient.init(_this->siteString());
         _this->kiwiSdrClient.start();
 
         sigpath::iqFrontEnd.setCurrentStreamTime(0); // not started yet
@@ -217,29 +221,43 @@ private:
             ImGui::EndDisabled();
 
             _this->selector.drawPopup([_this](const std::string& hostPort, const std::string& loc) {
-                snprintf(_this->siteBuf, sizeof(_this->siteBuf), "%s", hostPort.c_str());
+                _this->setSite(hostPort);
                 _this->kiwisdrLoc = loc;
-                config.acquire();
-                config.conf["kiwisdr_site"] = std::string(_this->siteBuf);
-                config.conf["kiwisdr_loc"] = _this->kiwisdrLoc;
-                config.release(true);
-                _this->kiwiSdrClient.init(_this->siteBuf);
+                _this->saveSite();
+                _this->kiwiSdrClient.init(_this->siteString());
             });
         }
 
+        // 连接成功后（网络线程里设的标记），在界面线程里把地址记入历史
+        if (_this->historyPending.exchange(false)) {
+            _this->hostHistory.add(_this->hostname, _this->port);
+        }
+
         if (_this->running) { SmGui::BeginDisabled(); }
-        SmGui::LeftLabel("KiwiSDR 地址");
+        // 地址历史：从下拉框选一条，同时填好地址和端口
         SmGui::FillWidth();
-        if (SmGui::InputText(CONCAT("##_kiwisdr_site_", _this->name), _this->siteBuf, sizeof(_this->siteBuf))) {
+        if (SmGui::Combo(CONCAT("##_kiwisdr_hist_", _this->name), &_this->hostHistoryId, _this->hostHistory.items())) {
+            if (_this->hostHistory.select(_this->hostHistoryId, _this->hostname, sizeof(_this->hostname), &_this->port) == HostHistory::SELECTED) {
+                _this->kiwisdrLoc.clear();
+                _this->saveSite();
+                _this->kiwiSdrClient.init(_this->siteString());
+            }
+            _this->hostHistoryId = 0;
+        }
+        // 地址和端口两个输入框（和 SpyServer 一样）
+        if (SmGui::InputText(CONCAT("##_kiwisdr_host_", _this->name), _this->hostname, sizeof(_this->hostname))) {
             _this->kiwisdrLoc.clear(); // manual edit: the stored location no longer applies
-            config.acquire();
-            config.conf["kiwisdr_site"] = std::string(_this->siteBuf);
-            config.conf["kiwisdr_loc"] = _this->kiwisdrLoc;
-            config.release(true);
+            _this->saveSite();
+        }
+        SmGui::SameLine();
+        SmGui::FillWidth();
+        if (SmGui::InputInt(CONCAT("##_kiwisdr_port_", _this->name), &_this->port, 0, 0)) {
+            _this->port = std::clamp<int>(_this->port, 1, 65535);
+            _this->kiwisdrLoc.clear();
+            _this->saveSite();
         }
         if (_this->running) { SmGui::EndDisabled(); }
 
-        SmGui::Text("格式: 主机:端口 或 http://主机:端口/");
         SmGui::Text((std::string(i18n::tr("位置: ")) + _this->kiwisdrLoc).c_str());
         SmGui::Text((std::string(i18n::tr("状态: ")) + std::string(_this->kiwiSdrClient.connectionStatus)).c_str());
 
@@ -258,8 +276,39 @@ private:
     bool timeSet = false;
     double lastTuneFrequency = 14100000.0;
 
-    char siteBuf[256] = "kiwi.example.com:8073";
+    char hostname[256] = "kiwi.example.com";
+    int port = 8073;
     std::string kiwisdrLoc;
+
+    HostHistory hostHistory;
+    int hostHistoryId = 0;
+    std::atomic<bool> historyPending{ false };
+
+    // 地址 + 端口拼成客户端要的 "主机:端口"（IPv6 地址加方括号）
+    std::string siteString() const {
+        std::string h = hostname;
+        if (h.find(':') != std::string::npos) { h = "[" + h + "]"; }
+        return h + ":" + std::to_string(port);
+    }
+
+    // 把 "主机:端口" 或 http://主机:端口/ 拆进地址和端口两个变量；解析失败就原样当作地址
+    void setSite(const std::string& site) {
+        KiwiEndpoint ep = kiwiParseSite(site);
+        if (ep.error.empty() && !ep.host.empty() && ep.port >= 1 && ep.port <= 65535) {
+            snprintf(hostname, sizeof(hostname), "%s", ep.host.c_str());
+            port = ep.port;
+        }
+        else {
+            snprintf(hostname, sizeof(hostname), "%s", site.c_str());
+        }
+    }
+
+    void saveSite() {
+        config.acquire();
+        config.conf["kiwisdr_site"] = siteString();
+        config.conf["kiwisdr_loc"] = kiwisdrLoc;
+        config.release(true);
+    }
 
     KiwiSDRClient kiwiSdrClient;
     KiwiSDRMapSelector selector;

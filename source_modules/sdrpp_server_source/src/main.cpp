@@ -7,6 +7,7 @@
 #include <core.h>
 #include <gui/style.h>
 #include <config.h>
+#include <utils/host_history.h>
 #include <gui/widgets/stepped_slider.h>
 #include <utils/optionlist.h>
 #include <gui/dialogs/dialog_box.h>
@@ -52,6 +53,7 @@ public:
         strcpy(hostname, hostStr.c_str());
         port = config.conf["port"];
         config.release();
+        hostHistory.load("sdrpp_server");
 
         sigpath::sourceManager.registerSource("SDR++ Server", &handler);
     }
@@ -154,6 +156,17 @@ private:
         });
 
         if (connected) { style::beginDisabled(); }
+        // 地址历史：从下拉框选一条，同时填好地址和端口
+        ImGui::SetNextItemWidth(menuWidth);
+        if (ImGui::Combo(CONCAT("##sdrpp_srv_srv_hist_", _this->name), &_this->hostHistoryId, _this->hostHistory.items())) {
+            if (_this->hostHistory.select(_this->hostHistoryId, _this->hostname, sizeof(_this->hostname), &_this->port) == HostHistory::SELECTED) {
+                config.acquire();
+                config.conf["hostname"] = _this->hostname;
+                config.conf["port"] = _this->port;
+                config.release(true);
+            }
+            _this->hostHistoryId = 0;
+        }
         if (ImGui::InputText(CONCAT("##sdrpp_srv_srv_host_", _this->name), _this->hostname, 1023)) {
             config.acquire();
             config.conf["hostname"] = _this->hostname;
@@ -236,6 +249,7 @@ private:
             if (client) { client.reset(); }
             client = server::connect(hostname, port, &stream);
             deviceInit();
+            hostHistory.add(hostname, port);  // 连接成功：记住地址和端口
         }
         catch (const std::exception& e) {
             flog::error("Could not connect to SDR: {}", e.what());
@@ -276,6 +290,8 @@ private:
 
     char hostname[1024];
     int port = 50000;
+    HostHistory hostHistory;
+    int hostHistoryId = 0;
     std::string devConfName = "";
 
     dsp::stream<dsp::complex_t> stream;

@@ -258,6 +258,17 @@ static const int TABLE_DRAW_CHANNEL_BG2_FROZEN = 1;
 static const int TABLE_DRAW_CHANNEL_NOCLIP = 2;                     // When using ImGuiTableFlags_NoClip (this becomes the last visible channel)
 static const float TABLE_BORDER_SIZE                     = 1.0f;    // FIXME-TABLE: Currently hard-coded because of clipping assumptions with outer borders rendering.
 static const float TABLE_RESIZE_SEPARATOR_HALF_THICKNESS = 4.0f;    // Extend outside inner borders.
+
+// [SDR++] 列边框的可拖动范围。鼠标 4 像素够用，但手指在 Android 上很难按中这么窄的边框，
+// 所以 Android 上按字号放宽（字号已经随界面缩放）。拖动时算新列宽的地方也必须用同一个值。
+static inline float TableResizeSeparatorHalfThickness()
+{
+#ifdef __ANDROID__
+    return ImMax(TABLE_RESIZE_SEPARATOR_HALF_THICKNESS, ImFloor(GImGui->FontSize * 0.9f));
+#else
+    return TABLE_RESIZE_SEPARATOR_HALF_THICKNESS;
+#endif
+}
 static const float TABLE_RESIZE_SEPARATOR_FEEDBACK_TIMER = 0.06f;   // Delay/timer before making the hover feedback (color+cursor) visible because tables/columns tends to be more cramped.
 
 // Helper
@@ -1141,7 +1152,7 @@ void ImGui::TableUpdateBorders(ImGuiTable* table)
     // use the final height from last frame. Because this is only affecting _interaction_ with columns, it is not
     // really problematic (whereas the actual visual will be displayed in EndTable() and using the current frame height).
     // Actual columns highlight/render will be performed in EndTable() and not be affected.
-    const float hit_half_width = TABLE_RESIZE_SEPARATOR_HALF_THICKNESS;
+    const float hit_half_width = TableResizeSeparatorHalfThickness();
     const float hit_y1 = table->OuterRect.Min.y;
     const float hit_y2_body = ImMax(table->OuterRect.Max.y, hit_y1 + table->LastOuterHeight);
     const float hit_y2_head = hit_y1 + table->LastFirstRowHeight;
@@ -1311,7 +1322,7 @@ void    ImGui::EndTable()
     if (table->ResizedColumn != -1 && table->InstanceCurrent == table->InstanceInteracted)
     {
         ImGuiTableColumn* column = &table->Columns[table->ResizedColumn];
-        const float new_x2 = (g.IO.MousePos.x - g.ActiveIdClickOffset.x + TABLE_RESIZE_SEPARATOR_HALF_THICKNESS);
+        const float new_x2 = (g.IO.MousePos.x - g.ActiveIdClickOffset.x + TableResizeSeparatorHalfThickness());
         const float new_width = ImFloor(new_x2 - column->MinX - table->CellSpacingX1 - table->CellPaddingX * 2.0f);
         table->ResizedColumnNextWidth = new_width;
     }

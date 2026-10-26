@@ -10,6 +10,7 @@
 #include <gui/widgets/stepped_slider.h>
 #include <utils/optionlist.h>
 #include <gui/smgui.h>
+#include <utils/host_history.h>
 
 #define CONCAT(a, b) ((std::string(a) + b).c_str())
 
@@ -43,6 +44,7 @@ public:
         strcpy(hostname, hostStr.c_str());
         port = config.conf["port"];
         config.release();
+        hostHistory.load("rfspace");
 
         sigpath::sourceManager.registerSource("RFspace", &handler);
     }
@@ -131,6 +133,17 @@ private:
         gui::mainWindow.playButtonLocked = !connected;
 
         if (connected) { SmGui::BeginDisabled(); }
+        // 地址历史：从下拉框选一条，同时填好地址和端口
+        SmGui::FillWidth();
+        if (SmGui::Combo(CONCAT("##_rfspace_srv_hist_", _this->name), &_this->hostHistoryId, _this->hostHistory.items())) {
+            if (_this->hostHistory.select(_this->hostHistoryId, _this->hostname, sizeof(_this->hostname), &_this->port) == HostHistory::SELECTED) {
+                config.acquire();
+                config.conf["hostname"] = _this->hostname;
+                config.conf["port"] = _this->port;
+                config.release(true);
+            }
+            _this->hostHistoryId = 0;
+        }
         if (SmGui::InputText(CONCAT("##_rfspace_srv_host_", _this->name), _this->hostname, 1023)) {
             config.acquire();
             config.conf["hostname"] = _this->hostname;
@@ -153,6 +166,7 @@ private:
                 if (_this->client) { _this->client.reset(); }
                 _this->client = rfspace::connect(_this->hostname, _this->port, &_this->stream);
                 _this->deviceInit();
+                _this->hostHistory.add(_this->hostname, _this->port);  // 连接成功：记住地址和端口
             }
             catch (const std::exception& e) {
                 flog::error("Could not connect to SDR: {}", e.what());
@@ -303,6 +317,8 @@ private:
 
     char hostname[1024];
     int port = 50000;
+    HostHistory hostHistory;
+    int hostHistoryId = 0;
     std::string devConfName = "";
     std::string connectedStr = "";
 

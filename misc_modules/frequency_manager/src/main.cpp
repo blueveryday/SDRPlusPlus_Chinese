@@ -1,4 +1,5 @@
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <utils/flog.h>
 #include <module.h>
 #include <gui/gui.h>
@@ -297,6 +298,21 @@ public:
         config.acquire();
         std::string selList = config.conf["selectedList"];
         bookmarkDisplayMode = config.conf["bookmarkDisplayMode"];
+        // 书签表格各列的宽度（用户手动调整后保存的，按未缩放的像素保存）
+        if (config.conf.contains("columnWidths") && config.conf["columnWidths"].is_array() && config.conf["columnWidths"].size() == COLUMN_COUNT) {
+            bool ok = true;
+            float tmp[COLUMN_COUNT];
+            for (int i = 0; i < COLUMN_COUNT; i++) {
+                const json& v = config.conf["columnWidths"][i];
+                if (!v.is_number()) { ok = false; break; }
+                tmp[i] = v.get<float>();
+                if (!(tmp[i] >= 10.0f && tmp[i] <= 2000.0f)) { ok = false; break; }
+            }
+            if (ok) {
+                for (int i = 0; i < COLUMN_COUNT; i++) { savedColumnWidths[i] = tmp[i]; }
+                hasSavedColumnWidths = true;
+            }
+        }
         config.release();
 
         refreshLists();
@@ -987,6 +1003,53 @@ private:
         config.release(true);
     }
 
+
+    // 书签表格各列的初始宽度（像素，已含界面缩放）。
+    // 用户保存过的宽度优先；否则按字号计算：类型/P/S 刚好放下内容，剩下的宽度名称占 40%、详情占 60%。
+    void getColumnInitWidths(float* out) {
+        if (hasSavedColumnWidths) {
+            for (int i = 0; i < COLUMN_COUNT; i++) { out[i] = savedColumnWidths[i] * style::uiScale; }
+            return;
+        }
+        const ImGuiStyle& st = ImGui::GetStyle();
+        float pad = st.CellPadding.x * 2.0f + 2.0f;
+        out[0] = ImGui::CalcTextSize("频段").x + pad;
+        out[1] = ImGui::CalcTextSize("[P]").x + pad;
+        out[2] = ImGui::GetFrameHeight() + pad;
+        float avail = ImGui::GetContentRegionAvail().x - st.ScrollbarSize;
+        float rest = std::max<float>(avail - out[0] - out[1] - out[2], 160.0f * style::uiScale);
+        out[3] = rest * 0.4f;
+        out[4] = rest * 0.6f;
+    }
+
+    // 在表格里调用：用户拖动列边框、松开鼠标后，把新的列宽存进配置（下次启动沿用）。
+    // initWidths 是这次传给表格的初始宽度，只有和它（或上次保存的值）不同才会保存。
+    void saveColumnWidthsIfChanged(const float* initWidths) {
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) { return; }  // 正在拖动，等松开再存
+        // 不能用 ImGui::GetCurrentTable()：它是内联函数，里面直接用了全局变量 GImGui，
+        // Windows 上 GImGui 不会从主程序导出，模块链接会失败。GetCurrentContext() 是导出的函数，可以用。
+        ImGuiContext* ctx = ImGui::GetCurrentContext();
+        ImGuiTable* table = ctx ? ctx->CurrentTable : nullptr;
+        if (!table || table->ColumnsCount != COLUMN_COUNT) { return; }
+
+        float cur[COLUMN_COUNT];
+        bool changed = false;
+        for (int i = 0; i < COLUMN_COUNT; i++) {
+            float req = table->Columns[i].WidthRequest;
+            if (!(req >= 1.0f)) { return; }  // 列宽还没确定
+            cur[i] = req / style::uiScale;
+            float ref = hasSavedColumnWidths ? savedColumnWidths[i] : (initWidths[i] / style::uiScale);
+            if (fabsf(cur[i] - ref) > 0.5f) { changed = true; }
+        }
+        if (!changed) { return; }
+
+        for (int i = 0; i < COLUMN_COUNT; i++) { savedColumnWidths[i] = cur[i]; }
+        hasSavedColumnWidths = true;
+        config.acquire();
+        config.conf["columnWidths"] = json::array({ cur[0], cur[1], cur[2], cur[3], cur[4] });
+        config.release(true);
+    }
+
     static void menuHandler(void* ctx) {
         FrequencyManagerModule* _this = (FrequencyManagerModule*)ctx;
         float menuWidth = ImGui::GetContentRegionAvail().x;
@@ -1182,14 +1245,20 @@ private:
         }
 
         // Bookmark list
-        if (ImGui::BeginTable(("freq_manager_bkm_table" + _this->name).c_str(), 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY, ImVec2(0, 200.0f * style::uiScale))) {
-            ImGui::TableSetupColumn("类型", ImGuiTableColumnFlags_WidthFixed, 50.0f);
-            ImGui::TableSetupColumn("P", ImGuiTableColumnFlags_WidthFixed, 20.0f);  // Profile indicator
-            ImGui::TableSetupColumn("S", ImGuiTableColumnFlags_WidthFixed, 20.0f);  // Scanner toggle
-            ImGui::TableSetupColumn("名称");
-            ImGui::TableSetupColumn("详情");
-            ImGui::TableSetupScrollFreeze(5, 1);
+        // 五列都是固定宽度，并且允许横向滚动和拖动列边框：每一列（包括最后一列“详情”）的宽度都可以手动调整。
+        // （有拉伸列时，最右边那一列按 ImGui 的规则无法直接调整，所以不用拉伸列。）
+        float columnInitWidths[COLUMN_COUNT];
+        _this->getColumnInitWidths(columnInitWidths);
+        const ImGuiTableFlags bkmTableFlags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_ScrollX | ImGuiTableFlags_Resizable;
+        if (ImGui::BeginTable(("freq_manager_bkm_table" + _this->name).c_str(), COLUMN_COUNT, bkmTableFlags, ImVec2(0, 200.0f * style::uiScale))) {
+            ImGui::TableSetupColumn("类型", ImGuiTableColumnFlags_WidthFixed, columnInitWidths[0]);
+            ImGui::TableSetupColumn("P", ImGuiTableColumnFlags_WidthFixed, columnInitWidths[1]);  // Profile indicator
+            ImGui::TableSetupColumn("S", ImGuiTableColumnFlags_WidthFixed, columnInitWidths[2]);  // Scanner toggle
+            ImGui::TableSetupColumn("名称", ImGuiTableColumnFlags_WidthFixed, columnInitWidths[3]);
+            ImGui::TableSetupColumn("详情", ImGuiTableColumnFlags_WidthFixed, columnInitWidths[4]);
+            ImGui::TableSetupScrollFreeze(0, 1);  // 只冻结表头行，列可以横向滚动
             ImGui::TableHeadersRow();
+            _this->saveColumnWidthsIfChanged(columnInitWidths);
             
             // Add helpful tooltip for new UX functionality
             if (ImGui::IsItemHovered()) {
@@ -1685,6 +1754,11 @@ private:
     std::vector<WaterfallBookmark> waterfallBookmarks;
 
     int bookmarkDisplayMode = 0;
+
+    // 书签表格：5 列（类型、P、S、名称、详情）。宽度保存的是未乘界面缩放的像素值。
+    static const int COLUMN_COUNT = 5;
+    float savedColumnWidths[COLUMN_COUNT] = {};
+    bool hasSavedColumnWidths = false;
     
     // SCANNER INTEGRATION: Interface handler for ModuleComManager
     enum InterfaceCommands {

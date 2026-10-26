@@ -512,6 +512,20 @@ void MainWindow::draw() {
                 ImGui::SetScrollY(ImGui::GetScrollY() + scrollDelta);
             }
 
+            // 手指落在面板内某个带滚动条的列表上（例如频率管理器的书签表格）时，滚动的是这个列表
+            unsigned int innerId = 0;
+            float innerDelta = touchscroll::consumeInnerScroll(&innerId);
+            if (innerDelta != 0.0f && innerId != 0) {
+                ImGuiWindow* innerWin = ImGui::FindWindowByID(innerId);
+                if (innerWin && innerWin->Active && !innerWin->Hidden) {
+                    float target = std::clamp<float>(innerWin->Scroll.y + innerDelta, 0.0f, innerWin->ScrollMax.y);
+                    ImGui::SetScrollY(innerWin, target);
+                }
+            }
+
+            // 菜单标题栏的拖动手柄每帧重新登记（菜单顺序未锁定时才有）
+            touchscroll::clearDragHandles();
+
             ImVec2 panelPos = ImGui::GetWindowPos();
             ImVec2 panelSize = ImGui::GetWindowSize();
             // 右侧滚动条区域留给原来的拖动条操作
@@ -561,17 +575,19 @@ void MainWindow::draw() {
 
             // ImGui::Text("Buffering: %d", (sigpath::iqFrontEnd.inputBuffer.writeCur - sigpath::iqFrontEnd.inputBuffer.readCur + 32) % 32);
 
-            if (ImGui::Button("Test Bug")) {
+            // 界面文字一律用中文原文，这样才能被语言文件翻译（英文原文不会出现在语言文件里）
+            if (ImGui::Button("测试错误日志")) {
                 flog::error("Will this make the software crash?");
             }
 
-            if (ImGui::Button("Testing something")) {
+            if (ImGui::Button("测试展开首个菜单")) {
                 gui::menu.order[0].open = true;
                 firstMenuRender = true;
             }
 
-            ImGui::Checkbox("WF Single Click", &gui::waterfall.VFOMoveSingleClick);
-            ImGui::Checkbox("Lock Menu Order", &gui::menu.locked);
+            ImGui::Checkbox("瀑布图单击移动 VFO", &gui::waterfall.VFOMoveSingleClick);
+            // 和“显示”菜单里的“锁定菜单顺序”是同一个开关，这里用不同的 ID 避免控件冲突
+            ImGui::Checkbox("锁定菜单顺序##_sdrpp_debug", &gui::menu.locked);
 
             ImGui::Spacing();
         }
@@ -581,6 +597,7 @@ void MainWindow::draw() {
             // 收集面板内各子窗口（模块里带滚动条的列表）的滚动条位置，供输入层避让。
             // 比滚动条本身略宽，方便手指按中。使用的是本帧的位置，下一帧的触摸事件生效。
             touchscroll::clearExclusions();
+            touchscroll::clearInner();
             ImGuiContext& g = *ImGui::GetCurrentContext();
             float pad = 12.0f * style::uiScale;
             for (ImGuiWindow* w : g.Windows) {
@@ -592,6 +609,10 @@ void MainWindow::draw() {
                 if (!inside) { continue; }
                 ImRect r = ImGui::GetWindowScrollbarRect(w, ImGuiAxis_Y);
                 touchscroll::addExclusion(r.Min.x - pad, r.Min.y, r.Max.x + pad, r.Max.y);
+
+                // 列表本身的可见区域：手指在上面竖直滑动时滚动列表（滚动条那一条仍然交给 ImGui 直接拖动）
+                ImRect vis = w->InnerClipRect;
+                touchscroll::addInner(w->ID, vis.Min.x, vis.Min.y, vis.Max.x, vis.Max.y, w->Scroll.y, w->ScrollMax.y);
             }
         }
 #endif
@@ -603,6 +624,8 @@ void MainWindow::draw() {
 #ifdef __ANDROID__
         touchscroll::clearPanel();
         touchscroll::clearExclusions();
+        touchscroll::clearInner();
+        touchscroll::clearDragHandles();
 #endif
         ImGui::Columns(3, "WindowColumns", false);
         ImGui::SetColumnWidth(0, 8 * style::uiScale);

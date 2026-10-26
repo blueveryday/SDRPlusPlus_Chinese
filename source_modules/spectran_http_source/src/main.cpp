@@ -7,6 +7,7 @@
 #include <gui/style.h>
 #include <config.h>
 #include <gui/smgui.h>
+#include <utils/host_history.h>
 #include <gui/widgets/stepped_slider.h>
 #include <utils/optionlist.h>
 
@@ -29,6 +30,7 @@ public:
 
         strcpy(hostname, "localhost");
         sampleRate = 5750000.0;
+        hostHistory.load("spectran_http");
 
         handler.ctx = this;
         handler.selectHandler = menuSelected;
@@ -123,6 +125,17 @@ private:
 
         if (connected) { SmGui::BeginDisabled(); }
 
+        // 地址历史：从下拉框选一条，同时填好地址和端口
+        SmGui::FillWidth();
+        if (SmGui::Combo(CONCAT("##spectran_http_hist_", _this->name), &_this->hostHistoryId, _this->hostHistory.items())) {
+            if (_this->hostHistory.select(_this->hostHistoryId, _this->hostname, sizeof(_this->hostname), &_this->port) == HostHistory::SELECTED) {
+                config.acquire();
+                config.conf["hostname"] = _this->hostname;
+                config.conf["port"] = _this->port;
+                config.release(true);
+            }
+            _this->hostHistoryId = 0;
+        }
         if (SmGui::InputText(CONCAT("##spectran_http_host_", _this->name), _this->hostname, 1023)) {
             config.acquire();
             config.conf["hostname"] = _this->hostname;
@@ -165,6 +178,7 @@ private:
             onFreqChangedId = client->onCenterFrequencyChanged.bind(&SpectranHTTPSourceModule::onFreqChanged, this);
             onSamplerateChangedId = client->onSamplerateChanged.bind(&SpectranHTTPSourceModule::onSamplerateChanged, this);
             client->startWorker();
+            hostHistory.add(hostname, port);  // 连接成功：记住地址和端口
         }
         catch (std::runtime_error e) {
             flog::error("Could not connect: {0}", e.what());
@@ -205,6 +219,8 @@ private:
 
     char hostname[1024];
     int port = 54664;
+    HostHistory hostHistory;
+    int hostHistoryId = 0;
     dsp::stream<dsp::complex_t> stream;
 
 };

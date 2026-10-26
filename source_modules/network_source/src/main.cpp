@@ -9,6 +9,7 @@
 #include <gui/smgui.h>
 #include <gui/widgets/stepped_slider.h>
 #include <utils/optionlist.h>
+#include <utils/host_history.h>
 
 #define CONCAT(a, b) ((std::string(a) + b).c_str())
 
@@ -70,6 +71,7 @@ public:
         sampleTypes.define("Float32", SAMPLE_TYPE_FLOAT32);
 
         // Load config
+        hostHistory.load("network_source");
         config.acquire();
         if (config.conf[name].contains("samplerate")) {
             samplerate = config.conf[name]["samplerate"];
@@ -172,6 +174,9 @@ private:
             return;
         }
 
+        // 连接成功：记住地址和端口
+        _this->hostHistory.add(_this->hostname, _this->port);
+
         // Start receive worker
         _this->workerThread = std::thread(&NetworkSourceModule::worker, _this);
 
@@ -213,6 +218,17 @@ private:
         if (_this->running) { SmGui::BeginDisabled(); }
 
         // Hostname and port field
+        // 地址历史：从下拉框选一条，同时填好地址和端口
+        SmGui::FillWidth();
+        if (SmGui::Combo(("##network_source_hist_" + _this->name).c_str(), &_this->hostHistoryId, _this->hostHistory.items())) {
+            if (_this->hostHistory.select(_this->hostHistoryId, _this->hostname, sizeof(_this->hostname), &_this->port) == HostHistory::SELECTED) {
+                config.acquire();
+                config.conf[_this->name]["host"] = _this->hostname;
+                config.conf[_this->name]["port"] = _this->port;
+                config.release(true);
+            }
+            _this->hostHistoryId = 0;
+        }
         if (SmGui::InputText(("##network_source_host_" + _this->name).c_str(), _this->hostname, sizeof(_this->hostname))) {
             config.acquire();
             config.conf[_this->name]["host"] = _this->hostname;
@@ -332,6 +348,8 @@ private:
     int sampTypeId;
     char hostname[1024] = "localhost";
     int port = 1234;
+    HostHistory hostHistory;
+    int hostHistoryId = 0;
 
     OptionList<std::string, Protocol> protocols;
     OptionList<std::string, SampleType> sampleTypes;
