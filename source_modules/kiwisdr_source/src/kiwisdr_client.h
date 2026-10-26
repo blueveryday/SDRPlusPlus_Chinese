@@ -29,6 +29,7 @@
 struct KiwiEndpoint {
     std::string host;
     int port = 0;
+    std::string basePath; // 反向代理子路径，例如 "/kiwi-sub"，末尾不带 '/'
     std::string error;
 };
 
@@ -46,7 +47,15 @@ inline KiwiEndpoint kiwiParseSite(std::string s) {
         s = s.substr(schemePos + 3);
     }
     auto cut = s.find_first_of("/?#");
-    if (cut != std::string::npos) { s.erase(cut); }
+    if (cut != std::string::npos) {
+        if (s[cut] == '/') {
+            auto end = s.find_first_of("?#", cut);
+            ep.basePath = s.substr(cut, end == std::string::npos ? std::string::npos : end - cut);
+            while (!ep.basePath.empty() && ep.basePath.back() == '/') { ep.basePath.pop_back(); }
+            if (ep.basePath == "/index.html" || ep.basePath == "/kiwi") { ep.basePath.clear(); }
+        }
+        s.erase(cut);
+    }
     auto at = s.rfind('@');
     if (at != std::string::npos) { s = s.substr(at + 1); }
 
@@ -93,8 +102,11 @@ inline KiwiEndpoint kiwiParseSite(std::string s) {
         ep.error = "https/wss (TLS) is not supported, use http://host:port";
         return ep;
     }
+    else if (scheme == "http" || scheme == "ws") {
+        ep.port = 80; // 显式写了 http:// 且没写端口，浏览器会用 80
+    }
     else {
-        ep.port = 8073;
+        ep.port = 8073; // 只写主机名时保持 KiwiSDR 默认端口
     }
     return ep;
 }
@@ -141,13 +153,14 @@ struct KiwiSDRClient {
         };
 
         wsClient.onConnected = [&]() {
+            // 尽量贴近 KiwiSDR 网页端 openwebrx.js 的初始化顺序
             wsClient.sendString("SET auth t=kiwi p=#");
+            wsClient.sendString("SERVER DE CLIENT openwebrx.js SND");
             if (!identUser.empty()) {
                 wsClient.sendString("SET ident_user=" + identUser);
                 flog::info("KiwiSDRClient: sent SET ident_user={}", identUser);
             }
             wsClient.sendString("SET AR OK in=" + std::to_string(IQDATA_FREQUENCY) + " out=48000");
-            wsClient.sendString("SERVER DE CLIENT sdr++brown SND");
             wsClient.sendString("SET compression=0");
             wsClient.sendString("SET agc=0 hang=0 thresh=-100 slope=6 decay=1000 manGain=50");
             connected = true;
@@ -192,6 +205,22 @@ struct KiwiSDRClient {
                 start = msg.substr(0, 3);
             }
             if (start == "MSG") {
+                flog::info("KiwiSDR MSG: {}", msg.substr(0, 160));
+                if (msg.find("inactivity_timeout") != std::string::npos) {
+                    snprintf(connectionStatus, sizeof connectionStatus, "Server: inactivity timeout");
+                }
+                else if (msg.find("ip_limit") != std::string::npos) {
+                    snprintf(connectionStatus, sizeof connectionStatus, "Server: daily IP time limit");
+                }
+                else if (msg.find("badp=1") != std::string::npos) {
+                    snprintf(connectionStatus, sizeof connectionStatus, "Server requires password");
+                }
+                else if (msg.find("redirect=") != std::string::npos) {
+                    snprintf(connectionStatus, sizeof connectionStatus, "Server redirects to another address");
+                }
+                else if (msg.find("too_busy") != std::string::npos || msg.find("down") != std::string::npos) {
+                    snprintf(connectionStatus, sizeof connectionStatus, "Server: busy / down");
+                }
             }
             else if (start == "SND") {
                 if ((outCount++) % 50 == 0) {
@@ -288,7 +317,8 @@ struct KiwiSDRClient {
         };
         lastPing = kiwiNowMillis();
         wsClient.onEveryReceive = [&]() {
-            if (kiwiNowMillis() - lastPing > 4000) {
+            // 浏览器端不是 4 秒发一次 keepalive；放宽到 15 秒，降低触发服务器速率限制的概率
+            if (kiwiNowMillis() - lastPing > 15000) {
                 wsClient.sendString("SET keepalive");
                 lastPing = kiwiNowMillis();
             }
@@ -342,8 +372,60 @@ struct KiwiSDRClient {
                     failed = true;
                 }
                 else {
-                    flog::info("calling x.connectAndReceiveLoop..");
-                    wsClient.connectAndReceiveLoop(ep.host, ep.port, "/kiwi/" + std::to_string(kiwiNowMillis()) + "/SND");
+                    // === 1. 发送 HTTP GET /VER 获取真实 ts ===
+                    std::string realTs = "";
+                    try {
+                        flog::info("KiwiSDRClient: GET /VER ...");
+                        auto httpSock = net::connect(Address(ep.host, ep.port));
+                        if (httpSock) {
+                            std::string req = "GET " + ep.basePath + "/VER HTTP/1.1\r\n";
+                            req += "Host: " + ep.host + (ep.port == 80 ? "" : ":" + std::to_string(ep.port)) + "\r\n";
+                            req += "User-Agent: " + wsClient.userAgent + "\r\n";
+                            req += "Accept: */*\r\n";
+                            req += "Connection: close\r\n\r\n";
+                            httpSock->sendstr(req);
+                            
+                            uint8_t buf[2048];
+                            int recvd = httpSock->recv(buf, sizeof(buf) - 1, false, 3000);
+                            if (recvd > 0) {
+                                buf[recvd] = 0;
+                                std::string resp((char*)buf);
+                                auto pos = resp.find("\r\n\r\n");
+                                if (pos != std::string::npos) {
+                                    std::string body = resp.substr(pos + 4);
+                                    // 目标格式: {"maj":1,"min":902,"ts":4611686869679014366,"sp":0}
+                                    auto tsKeyPos = body.find("\"ts\":");
+                                    if (tsKeyPos != std::string::npos) {
+                                        auto valStart = tsKeyPos + 5; // 跳过 "ts":
+                                        auto valEnd = body.find_first_of(",}", valStart);
+                                        if (valEnd != std::string::npos) {
+                                            realTs = body.substr(valStart, valEnd - valStart);
+                                            // 去除可能存在的空格和回车
+                                            realTs.erase(std::remove(realTs.begin(), realTs.end(), ' '), realTs.end());
+                                            realTs.erase(std::remove(realTs.begin(), realTs.end(), '\r'), realTs.end());
+                                            realTs.erase(std::remove(realTs.begin(), realTs.end(), '\n'), realTs.end());
+                                            flog::info("KiwiSDRClient: Got real ts from /VER: {}", realTs);
+                                        }
+                                    }
+                                }
+                            }
+                            httpSock->close();
+                        }
+                    } catch (const std::exception& e) {
+                        flog::warn("KiwiSDRClient: /VER request failed: {}", e.what());
+                    }
+
+                    if (realTs.empty()) {
+                        // 如果没拿到，回退到本地时间，但大概率连不上
+                        realTs = std::to_string(kiwiNowMillis());
+                        flog::warn("KiwiSDRClient: failed to get ts from /VER, using local: {}", realTs);
+                    }
+
+                    // === 2. 使用获取到的 ts 拼接真实的 WebSocket 路径 ===
+                    std::string wsPath = ep.basePath + "/ws/kiwi/" + realTs + "/SND";
+                    flog::info("KiwiSDRClient: Connecting WS to path: {}", wsPath);
+                    
+                    wsClient.connectAndReceiveLoop(ep.host, ep.port, wsPath);
                     flog::info("x.connectAndReceiveLoop exited.");
                     snprintf(connectionStatus, sizeof connectionStatus, "Disconnected");
                 }

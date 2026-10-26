@@ -17,7 +17,14 @@
 #include <utils/net.h>
 #include <stdio.h>
 #include <random>
+#include <chrono>
 #include <stdexcept>
+#include <vector>
+#include <algorithm>
+#include <cstring>
+#include <cstdint>
+#include <cerrno>
+#include <functional>
 #include "kiwi_strings.h"
 #include <utils/flog.h>
 
@@ -31,6 +38,14 @@ namespace net::websock {
         std::uniform_int_distribution<int> uniform_dist;
         std::atomic<bool> stopped{ false };
         std::mutex sockMutex;
+
+        // sendString() 会被 GUI 线程（tune）和接收线程（keepalive/pong）同时调用
+        std::mutex sendMutex;
+        std::string userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
+        // 可选 Cookie，例如 "ident=xxx"；为空则不发送 Cookie 头
+        std::string cookie;
+        // 可选 Referer 覆盖；为空时自动用 http://hostAndPort/
+        std::string refererOverride;
 
         WSClient() : socket(), rd(), e1(rd()), uniform_dist(0, 255) {
             flog::info("WSClient instance: {}", (const void*)this);
@@ -64,10 +79,15 @@ namespace net::websock {
             case INCOMPLETE_FRAME:
                 return 0;
             case ERROR_FRAME:
-                printf("ERROR FRAME: %x\n", frameType);
+                flog::warn("websock: non-data frame, opcode={}, payload={} bytes", (int)(data[0] & 0x0F), outLen - 1);
+                if ((data[0] & 0x0F) == 0x8 && outLen >= 3) {
+                    int closeCode = ((unsigned char)buffer[0] << 8) | (unsigned char)buffer[1];
+                    flog::warn("websock: server sent CLOSE code={} reason={}", closeCode, buffer.substr(2, outLen - 3));
+                }
                 break;
             case PING_FRAME:
-                sendPong();
+                // 浏览器会把 ping 的 payload 原样放进带掩码的 pong
+                sendPong((const unsigned char*)buffer.data(), outLen > 0 ? std::min(outLen - 1, 125) : 0);
                 break;
             default:
                 printf("Unknown frame type: %x\n", frameType);
@@ -77,31 +97,32 @@ namespace net::websock {
             return skipSize;
         }
 
-        void sendPong() {
-            std::string str = " ";
+        void sendPong(const unsigned char* payload, int payloadLen) {
+            std::lock_guard<std::mutex> lck(sendMutex);
             std::string buffer;
-            buffer.resize(200, ' ');
-            int len = makeFrame(PONG_FRAME, (unsigned char*)str.c_str(), 0, (unsigned char *)buffer.data(), buffer.size());
+            buffer.resize(payloadLen + 200, ' ');
+            int len = makeFrame(PONG_FRAME, (unsigned char*)payload, payloadLen, (unsigned char *)buffer.data(), buffer.size());
             buffer.resize(len);
-            socket->sendstr(buffer);
-            //
+            if (socket) { socket->sendstr(buffer); }
         }
 
         void sendString(const std::string &str) {
+            std::lock_guard<std::mutex> lck(sendMutex);
             std::string buffer;
             buffer.resize(str.length() + 200, ' ');
             int len = makeFrame(TEXT_FRAME, (unsigned char*)str.c_str(), str.length(), (unsigned char *)buffer.data(), buffer.size());
             buffer.resize(len);
-            socket->sendstr(buffer);
+            if (socket) { socket->sendstr(buffer); }
 //            flog::info("<= {}", str);
         }
 
         void sendBinary(const std::vector<uint8_t>& data) {
+            std::lock_guard<std::mutex> lck(sendMutex);
             std::string buffer;
             buffer.resize(data.size() + 200, ' ');
             int len = makeFrame(BINARY_FRAME, (unsigned char*)data.data(), data.size(), (unsigned char *)buffer.data(), buffer.size());
             buffer.resize(len);
-            socket->sendstr(buffer);
+            if (socket) { socket->sendstr(buffer); }
         }
 
         // PARTS were taken from https://github.com/katzarsky/WebSocket
@@ -127,7 +148,7 @@ namespace net::websock {
         {
             int pos = 0;
             int size = msg_length;
-            buffer[pos++] = (unsigned char)frame_type; // fin included
+            buffer[pos++] = (frame_type == PONG_FRAME) ? 0x8A : (unsigned char)frame_type; // fin included
 
             if(size <= 125) {
                 buffer[pos++] = size; // set mask bit
@@ -153,14 +174,14 @@ namespace net::websock {
                     buffer[pos++] = ((size >> 8*i) & 0xFF);
                 }
             }
-            if (frame_type != PONG_FRAME) {
-                buffer[1] |= 0x80; // set mask bit
+            {
+                buffer[1] |= 0x80; // 客户端帧必须带掩码
                 auto maskIndex = pos;
                 buffer[pos++] = uniform_dist(e1);
                 buffer[pos++] = uniform_dist(e1);
                 buffer[pos++] = uniform_dist(e1);
                 buffer[pos++] = uniform_dist(e1);
-                memcpy((void*)(buffer+pos), msg, size);
+                if (size > 0) { memcpy((void*)(buffer+pos), msg, size); }
                 for(int q=0; q<size; q++) {
                     buffer[pos+q] ^= buffer[maskIndex + (q%4)];
                 }
@@ -256,6 +277,29 @@ namespace net::websock {
         std::function<void()> onDisconnected = [](){};
         std::function<void()> onEveryReceive = [](){};
 
+        static std::string base64Encode(const uint8_t* data, size_t len) {
+            static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            std::string out;
+            out.reserve(((len + 2) / 3) * 4);
+            for (size_t i = 0; i < len; i += 3) {
+                uint32_t v = (uint32_t)data[i] << 16;
+                if (i + 1 < len) { v |= (uint32_t)data[i + 1] << 8; }
+                if (i + 2 < len) { v |= (uint32_t)data[i + 2]; }
+                out += tbl[(v >> 18) & 63];
+                out += tbl[(v >> 12) & 63];
+                out += (i + 1 < len) ? tbl[(v >> 6) & 63] : '=';
+                out += (i + 2 < len) ? tbl[v & 63] : '=';
+            }
+            return out;
+        }
+
+        // 浏览器每次连接都发 16 个随机字节的 base64
+        std::string makeWebSocketKey() {
+            uint8_t raw[16];
+            for (auto& b : raw) { b = (uint8_t)uniform_dist(e1); }
+            return base64Encode(raw, sizeof(raw));
+        }
+
         void connectAndReceiveLoop(const std::string& host, int port, const std::string& path) {
             flog::info("WSClient connectAndReceiveLoop: inst={}", (const void*)this);
             // 'stopped' is cleared by the caller before the thread starts, so a stop request that arrives
@@ -273,24 +317,33 @@ namespace net::websock {
             }
             flog::info("WSClient socket connected");
 
-            std::string initHeaders =
-                "Accept-Encoding: gzip, deflate\r\n"
-                "Accept-Language: en-US,en\r\n"
-                "Cache-Control: no-cache\r\n"
-                "Connection: Upgrade\r\n"
-                "Cookie: ident=\r\n"
-                "Pragma: no-cache\r\n"
-                "Sec-GPC: 1\r\n"
-                "Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n"
-                "Sec-WebSocket-Key: tXZvmn8MbkVRhAoczhuyVQ==\r\n"
-                "Sec-WebSocket-Version: 13\r\n"
-                "Upgrade: websocket\r\n"
-                "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36\r\n";
-            initHeaders = "GET " + path + " HTTP/1.1\r\n" + initHeaders;
-            // IPv6 字面量在 HTTP 头中必须带方括号，例如 "Host: [2001:db8::1]:8073"
             const std::string hostForHeader = (host.find(':') != std::string::npos && host.front() != '[') ? ("[" + host + "]") : host;
-            initHeaders += "Host: " + hostForHeader + ":" + std::to_string(port) + "\r\n";
-            initHeaders += "Origin: http://" + hostForHeader + ":" + std::to_string(port) + "\r\n";
+            const std::string hostAndPort = (port == 80) ? hostForHeader : (hostForHeader + ":" + std::to_string(port));
+            const std::string originAndReferer = "http://" + hostAndPort;
+            const std::string referer = refererOverride.empty() ? (originAndReferer + "/") : refererOverride;
+
+            // 按 Chrome 的常见顺序发送，尽量不显得异常；补充 Sec-CH-UA / Sec-Fetch-* 等字段
+            std::string initHeaders = "GET " + path + " HTTP/1.1\r\n";
+            initHeaders += "Host: " + hostAndPort + "\r\n";
+            initHeaders += "Connection: Upgrade\r\n";
+            initHeaders += "Pragma: no-cache\r\n";
+            initHeaders += "Cache-Control: no-cache\r\n";
+            initHeaders += "User-Agent: " + userAgent + "\r\n";
+            initHeaders += "Upgrade: websocket\r\n";
+            initHeaders += "Origin: " + originAndReferer + "\r\n";
+            initHeaders += "Sec-WebSocket-Version: 13\r\n";
+            initHeaders += "Accept-Encoding: gzip, deflate, br, zstd\r\n";
+            initHeaders += "Accept-Language: en-US,en;q=0.9\r\n";
+            initHeaders += "Accept: */*\r\n";
+            initHeaders += "Referer: " + referer + "\r\n";
+            initHeaders += "Sec-CH-UA: \"Chromium\";v=\"130\", \"Google Chrome\";v=\"130\", \"Not?A_Brand\";v=\"99\"\r\n";
+            initHeaders += "Sec-CH-UA-Mobile: ?0\r\n";
+            initHeaders += "Sec-CH-UA-Platform: \"Windows\"\r\n";
+            initHeaders += "Sec-Fetch-Dest: websocket\r\n";
+            initHeaders += "Sec-Fetch-Mode: websocket\r\n";
+            initHeaders += "Sec-Fetch-Site: same-origin\r\n";
+            if (!cookie.empty()) { initHeaders += "Cookie: " + cookie + "\r\n"; }
+            initHeaders += "Sec-WebSocket-Key: " + makeWebSocketKey() + "\r\n";
             initHeaders += "\r\n";
 
             int len = socket->sendstr(initHeaders);
@@ -299,39 +352,39 @@ namespace net::websock {
 
             uint8_t buf[100000];
 
-            int recvd = socket->recv(buf, sizeof(buf) - 1, false, NO_TIMEOUT);
-            if (recvd <= 0) {
-                std::string msg = "websock: recv failed, errno=" + std::to_string(errno)+" (recvd="+std::to_string(recvd)+
-                                  " sent="+std::to_string(len)+" senderr="+std::to_string(senderr)+")";
-                socket->close();
-                throw std::runtime_error(msg);
+            std::string bufs;
+            size_t pos = std::string::npos;
+            int recvd = 0;
+            while ((pos = bufs.find("\r\n\r\n")) == std::string::npos) {
+                recvd = socket->recv(buf, sizeof(buf), false, NO_TIMEOUT);
+                if (recvd <= 0) {
+                    std::string msg = "websock: recv failed, errno=" + std::to_string(errno) + " (recvd=" + std::to_string(recvd) +
+                                      " sent=" + std::to_string(len) + " senderr=" + std::to_string(senderr) + ")";
+                    socket->close();
+                    throw std::runtime_error(msg);
+                }
+                bufs.append((const char*)buf, (size_t)recvd);
+                if (bufs.size() > 16384) {
+                    socket->close();
+                    throw std::runtime_error("websock: invalid response");
+                }
             }
-            buf[recvd] = 0;
-            flog::info("recvd: {}", recvd);
-            std::vector<std::string> recvHeaders;
-            std::string bufs = (char*)buf;
-            auto pos = bufs.find("\r\n\r\n");
-            if (pos == std::string::npos) {
-                socket->close();
-                throw std::runtime_error("websock: invalid response");
-            }
+            flog::info("recvd: {}", (int)bufs.size());
             {
-                // The server must answer "HTTP/1.1 101 Switching Protocols"; anything else (busy, 4xx/5xx) is an error.
                 std::string statusLine = bufs.substr(0, bufs.find("\r\n"));
                 if (statusLine.find(" 101") == std::string::npos) {
                     socket->close();
                     throw std::runtime_error("server refused websocket: " + statusLine.substr(0, 80));
                 }
             }
-            bufs.resize(pos + 2);
-            splitStringV(bufs, "\r\n", recvHeaders);
-            for (int i = 0; i < recvHeaders.size(); i++) {
-                printf("%s\n", recvHeaders[i].c_str());
+            std::vector<std::string> recvHeaders;
+            splitStringV(bufs.substr(0, pos + 2), "\r\n", recvHeaders);
+            for (size_t i = 0; i < recvHeaders.size(); i++) {
+                flog::info("websock: < {}", recvHeaders[i]);
             }
-            std::vector<uint8_t> data;
-            for (int i = (int)pos + 4; i < recvd; i++) {
-                data.push_back(buf[i]);
-            }
+            std::vector<uint8_t> data(bufs.begin() + pos + 4, bufs.end());
+
+            auto connectedAt = std::chrono::steady_clock::now();
             onConnected();
             while (true) {
                 int len0 = maybeDecodeBuffer(data);
@@ -342,10 +395,19 @@ namespace net::websock {
                 }
                 recvd = socket->recv(buf, sizeof(buf), false, 100); // 100 msec
                 if (recvd == 0) {
+                    onEveryReceive(); // 空闲 tick 也要驱动 keepalive
                     continue;
                 }
 //                printf("recvd bytes in loop: %d\n", recvd);
                 if (recvd <= 0) {
+                    int lastErr = 0;
+#ifdef _WIN32
+                    lastErr = WSAGetLastError();
+#else
+                    lastErr = errno;
+#endif
+                    auto secs = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - connectedAt).count();
+                    flog::warn("websock: recv returned {}, lasterr={}, after {} s, stopped_by_us={}", recvd, lastErr, (int64_t)secs, (int)stopped.load());
                     socket->close();
                     onDisconnected();
                     break;
@@ -356,6 +418,7 @@ namespace net::websock {
                 }
             }
         }
+
         void stopSocket() {
             stopped = true;
             std::shared_ptr<::net::Socket> sock;
